@@ -195,6 +195,57 @@ wherever they are reported. The fine band, where r runs 0.96–0.99, is the one 
 read: it gives 1.24× at 300 frames and 1.31× at 1140, against the Python
 prototype's 1.34×.
 
+### Why registration is a centroid and not a correlation
+
+The obvious objection to locating the disc by its centre of mass is that it
+breaks when the lit region is clipped by the frame edge, or when the Moon eats
+half the disc. Cross-correlation looks like the more robust answer. Measured on
+684 frames of a partial eclipse — a deep crescent, clipped at the bottom of the
+sensor, drifting 580 px in 27 seconds — it is not.
+
+Judged by how much ECC has to correct afterwards, and the correlation ECC
+reaches:
+
+| coarse method | ECC left to fix | p90 | ECC correlation | failures |
+|---|---|---|---|---|
+| centroid | **2.23 px** | 4.85 | 0.99938 | 0 |
+| cross-correlation @ 1/8 | 3.26 px | 8.10 | 0.99937 | 0 |
+| cross-correlation @ 1/4 | 3.30 px | 8.28 | 0.99939 | 0 |
+| cross-correlation @ 1/2 | 3.24 px | 8.29 | 0.99938 | 0 |
+
+Flat across scales, so this is not sub-pixel quantisation: the correlation peak
+is intrinsically broad. A crescent is a large, smooth, low-texture blob, and
+correlating it against itself gives a wide plateau with nothing for a sub-pixel
+fit to grip. The centroid wins because it is an *integral* estimator, averaging
+over ~850,000 lit pixels of a high-contrast object on a black background.
+
+**Phase correlation is worse still, and instructively so.** It was hand-rolled
+from `dft` — the build has no `phaseCorrelate`, no `mulSpectrums` and no
+`idft` — and validated on deltas, where it is exact: an 8x8 image shifted by
+(+3, +2) puts the peak at (5, 6), the correct wrapped position. On the crescent
+it returns zero shift every time. Sweeping the whitening from full to none:
+
+| whitening | worst error |
+|---|---|
+| full (pure phase correlation) | 14.2 px |
+| 0.1 | 5.8 px |
+| 1 | 3.6 px |
+| 10 (approaching plain cross-correlation) | 2.0 px |
+
+Accuracy improves monotonically as whitening is *reduced*. Phase correlation
+assumes a broadband spectrum: a delta has one, so every bin carries signal, but
+a smooth crescent's spectrum decays fast and most high-frequency bins hold only
+numerical noise. Whitening rescales that noise to unit magnitude alongside the
+real content, and it swamps the phase ramp.
+
+The corollary is that phase correlation would be an excellent choice for a star
+field, where the image really is a sum of deltas — but that is AstroFuse's
+problem, and it needs rotation, which plain phase correlation does not give.
+
+On this footage the choice barely matters anyway: every method reached ECC
+correlation 0.99938 with zero failures. The coarse stage is not the bottleneck.
+The framing is.
+
 ### Browser against headless
 
 The browser and the node harness run the same `pipeline.js`. On the same 40 real
