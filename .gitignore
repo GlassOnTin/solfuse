@@ -1,4 +1,5 @@
 testdata/*.mp4
+testdata/*.webm
+testdata/frames/
 testdata/out/
-testdata/truth.json
 scratch/
