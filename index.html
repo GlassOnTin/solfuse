@@ -86,9 +86,47 @@ details[open] summary { border-bottom: 1px solid var(--line); margin-bottom: 12p
 #status { color: var(--dim); font-size: .88rem; min-height: 1.4em; margin-top: 8px; }
 #status.err { color: var(--bad); }
 #detail { color: var(--dim); font-size: .8rem; font-variant-numeric: tabular-nums; }
-#preview { margin-top: 8px; line-height: 0; }
-#out { width: 100%; border-radius: 10px; background: #000; display: block; }
 #vid { display: none; }
+
+/* live view */
+.stagebar { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 6px; }
+.stage { font-size: .78rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line);
+         color: var(--dim); }
+.stage.on { border-color: var(--accent); color: var(--accent); }
+.stage.done { border-color: #4c7a4c; color: #7fb37f; }
+.livewrap { position: relative; line-height: 0; max-width: 460px; }
+#prev, #ovl { width: 100%; display: block; border-radius: 10px; image-rendering: auto; }
+#ovl { position: absolute; inset: 0; background: transparent; }
+#timeline { width: 100%; height: 64px; display: block; margin-top: 12px;
+            background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+
+/* result comparison */
+#compare { position: relative; margin-top: 8px; line-height: 0; cursor: ew-resize; touch-action: pan-y; }
+#out, #before { width: 100%; border-radius: 10px; background: #000; display: block; }
+#before { position: absolute; inset: 0; }
+#handle { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); pointer-events: none; }
+#handle::after { content: ""; position: absolute; top: 50%; left: 50%; width: 34px; height: 34px;
+  transform: translate(-50%, -50%); border-radius: 50%; background: var(--accent); box-shadow: 0 1px 6px #0008; }
+/* Kept for keyboard and screen-reader users; pointer dragging is handled on the
+   container so the divider lands exactly under the finger. */
+#wipe { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0;
+        pointer-events: none; -webkit-appearance: none; appearance: none; background: none; }
+#wipe:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tag { position: absolute; top: 10px; padding: 3px 8px; border-radius: 5px; background: #000a;
+       color: #fff; font-size: .72rem; line-height: 1.4; pointer-events: none; }
+.tag.l { left: 10px; } .tag.r { right: 10px; }
+
+/* stats */
+#stats { margin-top: 26px; }
+#stats h2 { font-size: 1rem; margin: 0 0 4px; }
+#statTable { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .88rem; }
+#statTable td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+#statTable td:first-child { color: var(--dim); width: 42%; }
+#statTable td.v { font-variant-numeric: tabular-nums; font-weight: 600; }
+/* The note is a div inside the value cell, not a cell of its own — targeting
+   td.note left every explanation rendered in bold. */
+#statTable .note { color: var(--dim); font-weight: 400; font-size: .82rem; margin-top: 2px; }
+#statTable tr.head td { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
 footer { color: var(--dim); font-size: .82rem; margin-top: 48px; border-top: 1px solid var(--line); padding-top: 16px; }
 footer a { color: var(--dim); }
 </style>
@@ -122,7 +160,51 @@ footer a { color: var(--dim); }
   <p id="detail"></p>
   <button id="copyDiag" class="ghost" hidden>Copy error details</button>
 
-  <div id="preview" hidden><canvas id="out"></canvas></div>
+  <!-- Live view: the stack as it builds, with the measured distortion field
+       drawn over it. The point is that the atmosphere becomes visible. -->
+  <section id="live" hidden>
+    <div class="stagebar">
+      <span class="stage" id="stage1">1 · Align on the disc</span>
+      <span class="stage" id="stage2">2 · Correct distortion</span>
+      <span class="stage" id="stage3">3 · Render</span>
+    </div>
+    <p class="hint" id="explain"></p>
+    <div class="livewrap">
+      <canvas id="prev"></canvas>
+      <canvas id="ovl"></canvas>
+    </div>
+    <div class="row" style="margin:8px 0 0">
+      <label><input id="showAps" type="checkbox" checked> Alignment points</label>
+      <label><input id="showField" type="checkbox" checked> Distortion field</label>
+      <label>Vector scale
+        <select id="vecScale">
+          <option value="10">10×</option>
+          <option value="25" selected>25×</option>
+          <option value="60">60×</option>
+        </select>
+      </label>
+    </div>
+    <canvas id="timeline" height="64"></canvas>
+    <p class="hint" id="tlhint">Per-frame distortion magnitude. Atmospheric seeing drifts on a timescale of a second or so, so this should wander rather than jump.</p>
+  </section>
+
+  <div id="compare" hidden>
+    <canvas id="out"></canvas>
+    <canvas id="before"></canvas>
+    <div id="handle"></div>
+    <span class="tag l">one frame</span>
+    <span class="tag r" id="tagAfter">stacked</span>
+    <input id="wipe" type="range" min="0" max="100" value="50"
+           aria-label="Compare a single frame with the stacked result">
+  </div>
+
+  <section id="stats" hidden>
+    <h2>What this run achieved</h2>
+    <p class="hint">Measured on your frames, not quoted. Odd and even frames are stacked
+      separately: structure that is real appears in both halves and noise does not, so the
+      correlation between them is a signal-to-noise ratio.</p>
+    <table id="statTable"></table>
+  </section>
 
   <div class="row" id="exports" hidden>
     <button id="dlPng">Download PNG</button>
@@ -160,6 +242,6 @@ document.getElementById('copyDiag').addEventListener('click', function () {
 </script>
 <!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
      worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
-<script src="app.js?v=1" type="module"></script>
+<script src="app.js?v=7" type="module"></script>
 </body>
 </html>

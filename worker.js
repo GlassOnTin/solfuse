@@ -31,7 +31,9 @@ let refQuarter = null, ref8 = null, aps = null, NG = 0;
 let transforms = [];
 let ramp = null, mapx = null, mapy = null;
 let globMean = null, mpaMean = null;
+let firstFrame = null;      // first aligned frame, kept for the before/after and the noise estimate
 let stats = { ecc: 0, shifts: [], used: [], field: [] };
+let PREVIEW_EVERY = 20;
 
 const post = (m, t) => self.postMessage(m, t || []);
 
@@ -55,8 +57,33 @@ function freeAll() {
   if (ref8) { ref8.delete(); ref8 = null; }
   if (aps) { for (const a of aps) { if (a.tmpl) a.tmpl.delete(); } aps = null; }
   acc1 = acc2 = null; transforms = []; globMean = mpaMean = null;
-  ramp = mapx = mapy = null;
+  ramp = mapx = mapy = null; firstFrame = null;
   stats = { ecc: 0, shifts: [], used: [], field: [] };
+}
+
+// Powers of two first, then a fixed cadence. The early frames are where the
+// visible change is fastest — four frames already look markedly cleaner than
+// one — and a fixed cadence alone means a short clip finishes without ever
+// showing a preview, which is how this was first written.
+const duePreview = (n) => (n <= 16 ? (n & (n - 1)) === 0 : n % PREVIEW_EVERY === 0);
+
+// A running look at the stack as it builds. Watching the noise disappear is the
+// clearest possible explanation of what stacking does, and it costs a strided
+// downsample every PREVIEW_EVERY frames.
+function sendPreview(acc, phase, grid) {
+  const mean = new Float32Array(acc.sum.length);
+  const k = 1 / Math.max(1, acc.frames);
+  for (let i = 0; i < mean.length; i++) mean[i] = acc.sum[i] * k;
+  const p = P.preview(mean, O.canvas, 420);
+  const msg = { type: 'preview', rgba: p.rgba.buffer, size: p.size, phase, frames: acc.frames };
+  const transfer = [p.rgba.buffer];
+  if (grid) {
+    // The displacement field, sent as the raw grid so the main thread can draw
+    // it however it likes. 21x21 floats is under 4 kB.
+    msg.grid = { n: NG, gx: grid.gx.buffer, gy: grid.gy.buffer };
+    transfer.push(grid.gx.buffer, grid.gy.buffer);
+  }
+  post(msg, transfer);
 }
 
 const handlers = {
@@ -88,20 +115,28 @@ const handlers = {
       stats.shifts.push(g.shift);
       transforms[m.index] = g.C;
       const warped = P.warpToCanvas(gray, W, H, g.C, O.canvas);
+      if (!firstFrame) firstFrame = Float32Array.from(warped.data);
       P.accumulate(acc1, warped.data, m.seq);
       warped.delete();
-      post({ type: 'framed', index: m.index, radius: g.centroid.radius });
+      if (duePreview(acc1.frames)) sendPreview(acc1, 1, null);
+      post({ type: 'framed', index: m.index, phase: 1,
+             cx: g.centroid.cx, cy: g.centroid.cy, radius: g.centroid.radius,
+             refine: g.shift, ecc: g.ecc });
     } else {
       const C = transforms[m.index];
       if (!C) { post({ type: 'framed', index: m.index, skipped: true }); return; }
       const warped = P.warpToCanvas(gray, W, H, C, O.canvas);
+      let mag = null, used = null, grid = null;
       if (O.multipoint && aps && aps.length) {
         const f = P.measureField(warped, aps, NG, O);
+        used = f.used;
         stats.used.push(f.used);
         const gx = P.fillNaN(f.gx, NG), gy = P.fillNaN(f.gy, NG);
-        let mag = 0;
-        for (let k = 0; k < gx.length; k++) mag += Math.hypot(gx[k], gy[k]);
-        stats.field.push(mag / gx.length);
+        let sum = 0;
+        for (let k = 0; k < gx.length; k++) sum += Math.hypot(gx[k], gy[k]);
+        mag = sum / gx.length;
+        stats.field.push(mag);
+        grid = { gx: Float32Array.from(gx), gy: Float32Array.from(gy) };
         P.densify(gx, NG, O.canvas, ramp.X, mapx);
         P.densify(gy, NG, O.canvas, ramp.Y, mapy);
         const mx = cv.matFromArray(O.canvas, O.canvas, cv.CV_32F, Array.from(mapx));
@@ -114,7 +149,8 @@ const handlers = {
         P.accumulate(acc2, warped.data, m.seq);
       }
       warped.delete();
-      post({ type: 'framed', index: m.index });
+      if (duePreview(acc2.frames)) sendPreview(acc2, 2, grid);
+      post({ type: 'framed', index: m.index, phase: 2, field: mag, used });
     }
   },
 
@@ -136,7 +172,12 @@ const handlers = {
       acc2 = P.newAccumulator(O.canvas, true);
     }
     const sh = stats.shifts.slice().sort((a, b) => a - b);
+    // Alignment-point positions go to the UI so the grid can be drawn over the
+    // preview: it is the clearest way to show what "multi-point" means, and
+    // which parts of the disc had enough structure to be locatable at all.
     post({ type: 'refReady', aps: aps ? aps.length : 0, grid: NG,
+           apPositions: aps ? aps.map((a) => [a.x, a.y]) : [],
+           canvas: O.canvas,
            frames: acc1.frames, eccFailures: stats.ecc,
            medianRefine: sh.length ? sh[sh.length >> 1] : null });
   },
@@ -149,13 +190,18 @@ const handlers = {
     const used = stats.used;
     const field = stats.field.slice().sort((a, b) => a - b);
     const buf = r.rgba.buffer;
-    post({ type: 'result', rgba: buf, size: O.canvas,
+    // Same tone curve as the stack, so the wipe compares stacks and not stretches.
+    const before = P.render(firstFrame || lin, O.canvas,
+      { forceLo: r.lo, forceHi: r.hi, sharpen: 0 });
+    const bbuf = before.rgba.buffer;
+    post({ type: 'result', rgba: buf, beforeRgba: bbuf, size: O.canvas,
            frames: (acc2 && acc2.frames) || acc1.frames,
            aps: aps ? aps.length : 0,
            apsUsed: used.length ? used.reduce((a, b) => a + b, 0) / used.length : null,
            fieldMedian: field.length ? field[field.length >> 1] : null,
            eccFailures: stats.ecc,
-           mem: memory() }, [buf]);
+           quality: measureQuality(lin),
+           mem: memory() }, [buf, bbuf]);
   },
 
   // Re-render what is already stacked: no re-decode, no re-align.
@@ -170,6 +216,30 @@ const handlers = {
 
   async free() { freeAll(); post({ type: 'freed' }); },
 };
+
+// What this run actually achieved, measured on the user's own frames rather
+// than quoted from the README. Costs a few seconds at the end.
+function measureQuality(finalLin) {
+  try {
+    const mask = P.innerMask(ref8, O, 121);
+    const q = { };
+    const g = P.reliability(acc1, O.canvas, mask, 1.4, 3.2);
+    const mp = acc2 && acc2.frames ? P.reliability(acc2, O.canvas, mask, 1.4, 3.2) : null;
+    if (g) q.globalSNR = g.snr, q.globalR = g.r;
+    if (mp) q.multiSNR = mp.snr, q.multiR = mp.r;
+    if (g && mp) q.snrGain = mp.snr / g.snr;
+
+    const active = mp ? acc2 : acc1;
+    const sFull = P.stackNoise(active, mask);
+    const s1 = firstFrame ? P.frameNoise(firstFrame, finalLin, mask) : null;
+    if (sFull != null) q.stackNoise = sFull;
+    if (s1 != null) q.frameNoise = s1;
+    if (sFull && s1) q.noiseReduction = s1 / sFull;
+    return q;
+  } catch (e) {
+    return { error: describe(e) };     // stats are a bonus; never fail the run for them
+  }
+}
 
 // Reported from inside the worker: performance.memory on the main thread cannot
 // see this heap, so measuring there would show a flat figure however large the

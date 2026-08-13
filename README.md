@@ -22,6 +22,42 @@ video -> requestVideoFrameCallback -> green plane
 
 ---
 
+## Seeing what it is doing
+
+The process is more interesting than the result, so the app shows it rather than
+hiding it behind a progress bar.
+
+- **The stack builds in front of you.** A preview updates at frames 1, 2, 4, 8,
+  16 and then every 20 — powers of two first because that is where the visible
+  change is fastest.
+- **The distortion field is drawn over it.** Each alignment point shows the
+  displacement it measured, exaggerated 10–60×. The vectors do not all point the
+  same way, which is the entire argument for multi-point alignment in one
+  picture. Only cells carrying a real measurement are drawn; the interpolated
+  remainder is not, because confident arrows over empty sky would be a lie.
+- **A timeline** of per-frame distortion magnitude. Seeing wanders over about a
+  second, so a smooth meander is the expected shape and spikes usually mean a
+  frame failed to match.
+- **A before/after wipe** between one frame and the stack, both rendered through
+  the *same* tone curve — otherwise the panel would be comparing two stretches.
+- **A stats panel** reporting what this run achieved on your frames, not what
+  the README claims. Every figure is derived from your own data, and where one
+  cannot be computed it is omitted rather than guessed.
+
+The two headline stats are worth explaining because they are honest in a way
+single-stack measures are not:
+
+**Noise reduction** compares one frame against the finished stack. The two
+half-stacks differ only by noise, so if each carries σ then sd(odd − even) =
+σ√2 and the full stack carries sd(odd − even)/2. Verified against synthetic data
+with known noise: 8.00 DN injected, 8.126 measured; stack noise 1.271 against a
+theoretical 1.265; reduction ×6.39 against a theoretical ×6.32.
+
+**Split-half SNR** correlates the odd- and even-frame stacks in a band. Real
+structure appears in both, noise does not, so r/(1−r) is a signal-to-noise
+ratio, and the ratio between the global and multi-point stacks is what the
+second pass actually bought.
+
 ## Measured behaviour
 
 All figures come from **C0013.MP4**: 1140 frames of real 4K solar video, 25 fps,

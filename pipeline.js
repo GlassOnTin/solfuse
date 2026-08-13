@@ -350,8 +350,11 @@
       let j = 0;
       for (let i = 0; i < n; i += 16) samp[j++] = lin[i];
       const s = samp.subarray(0, j).slice().sort();
-      const lo = s[Math.floor((opt.lo / 100) * (j - 1))];
-      const hi = s[Math.floor((opt.hi / 100) * (j - 1))];
+      // forceLo/forceHi let a second image be rendered through the SAME tone
+      // curve. Without that, a before/after panel compares two stretches rather
+      // than two stacks, and flatters whichever side got the kinder one.
+      const lo = opt.forceLo != null ? opt.forceLo : s[Math.floor((opt.lo / 100) * (j - 1))];
+      const hi = opt.forceHi != null ? opt.forceHi : s[Math.floor((opt.hi / 100) * (j - 1))];
       const scale = 255 / Math.max(1e-6, hi - lo);
 
       let src = new Float32Array(n);
@@ -376,11 +379,133 @@
       return { rgba, lo, hi };
     }
 
+    // ---- telemetry ---------------------------------------------------------
+    //
+    // These exist so the app can report what the run actually achieved instead
+    // of repeating what the README claims. Every figure below is derived from
+    // the user's own frames.
+
+    // Inner-disc mask as a plain byte array, for statistics that must exclude
+    // the limb (an enormous permanent edge) and the empty sky around it.
+    function innerMask(ref8, o, erodePx) {
+      const mask = discMaskMat(ref8, o);
+      const inner = new cv.Mat();
+      const n = erodePx || 121;
+      const k = cv.Mat.ones(n, n, cv.CV_8U);
+      cv.erode(mask, inner, k);
+      const out = Uint8Array.from(inner.data);
+      k.delete(); mask.delete(); inner.delete();
+      return out;
+    }
+
+    const bandOf = (arr, canvas, s1, s2) => {
+      const m = cv.matFromArray(canvas, canvas, cv.CV_32F, Array.from(arr));
+      const a = new cv.Mat(), b = new cv.Mat();
+      cv.GaussianBlur(m, a, new cv.Size(0, 0), s1);
+      cv.GaussianBlur(m, b, new cv.Size(0, 0), s2);
+      cv.subtract(a, b, a);
+      const out = Float32Array.from(a.data32F);
+      m.delete(); a.delete(); b.delete();
+      return out;
+    };
+
+    function correlate(a, b, mask) {
+      let n = 0, sa = 0, sb = 0;
+      for (let i = 0; i < a.length; i++) if (mask[i]) { n++; sa += a[i]; sb += b[i]; }
+      if (n < 100) return null;
+      const ma = sa / n, mb = sb / n;
+      let ca = 0, cb = 0, cab = 0;
+      for (let i = 0; i < a.length; i++) {
+        if (!mask[i]) continue;
+        const da = a[i] - ma, db = b[i] - mb;
+        ca += da * da; cb += db * db; cab += da * db;
+      }
+      return cab / Math.sqrt(ca * cb);
+    }
+
+    const halfMean = (acc, which) => {
+      const src = which === 'odd' ? acc.odd : acc.even;
+      const k = 1 / Math.max(1, which === 'odd' ? acc.nOdd : acc.nEven);
+      const out = new Float32Array(src.length);
+      for (let i = 0; i < out.length; i++) out[i] = src[i] * k;
+      return out;
+    };
+
+    // Split-half reliability. Odd and even frames are stacked separately, so
+    // structure that is real appears in both and noise does not: the
+    // correlation between them is the signal fraction, and r/(1-r) is an SNR.
+    //
+    // This is the only measurement in this project that has not misled. A
+    // residual-against-median noise estimate counts genuine fine solar detail
+    // as noise, and rates a sharper stack as a worse one.
+    function reliability(acc, canvas, mask, s1, s2) {
+      if (!acc || !acc.nOdd || !acc.nEven) return null;
+      const r = correlate(bandOf(halfMean(acc, 'odd'), canvas, s1, s2),
+                          bandOf(halfMean(acc, 'even'), canvas, s1, s2), mask);
+      if (r === null || !(r < 1)) return null;
+      return { r, snr: r / (1 - r) };
+    }
+
+    const sdOverMask = (a, mask) => {
+      let n = 0, s = 0, s2 = 0;
+      for (let i = 0; i < a.length; i++) if (mask[i]) { n++; s += a[i]; s2 += a[i] * a[i]; }
+      if (!n) return null;
+      return Math.sqrt(Math.max(0, s2 / n - (s / n) ** 2));
+    };
+
+    // Noise left in the finished stack. The two half-stacks differ only by
+    // noise, so if each half carries sigma_h then sd(odd - even) = sigma_h*sqrt2,
+    // and the full stack — twice as many frames — carries sigma_h/sqrt2. Hence
+    // sigma_full = sd(odd - even) / 2.
+    function stackNoise(acc, mask) {
+      if (!acc || !acc.nOdd || !acc.nEven) return null;
+      const o = halfMean(acc, 'odd'), e = halfMean(acc, 'even');
+      const d = new Float32Array(o.length);
+      for (let i = 0; i < d.length; i++) d[i] = o[i] - e[i];
+      const sd = sdOverMask(d, mask);
+      return sd === null ? null : sd / 2;
+    }
+
+    // Noise in one frame, estimated against the stack. The stack is a far better
+    // estimate of the truth than any single frame, so the difference is
+    // dominated by that frame's own noise.
+    function frameNoise(frame, stack, mask) {
+      const d = new Float32Array(frame.length);
+      for (let i = 0; i < d.length; i++) d[i] = frame[i] - stack[i];
+      return sdOverMask(d, mask);
+    }
+
+    // Cheap downsample for the live preview: integer stride and a min/max
+    // stretch, so it costs a fraction of a full render and can run mid-stack.
+    function preview(lin, canvas, size) {
+      const step = Math.max(1, Math.floor(canvas / size));
+      const n = Math.floor(canvas / step);
+      const small = new Float32Array(n * n);
+      for (let y = 0, k = 0; y < n; y++) {
+        const row = y * step * canvas;
+        for (let x = 0; x < n; x++, k++) small[k] = lin[row + x * step];
+      }
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i < small.length; i++) {
+        if (small[i] < lo) lo = small[i];
+        if (small[i] > hi) hi = small[i];
+      }
+      const scale = 255 / Math.max(1e-6, hi - lo);
+      const rgba = new Uint8ClampedArray(n * n * 4);
+      for (let i = 0, q = 0; i < small.length; i++, q += 4) {
+        const v = (small[i] - lo) * scale;
+        rgba[q] = rgba[q + 1] = rgba[q + 2] = v;
+        rgba[q + 3] = 255;
+      }
+      return { rgba, size: n };
+    }
+
     return {
       DEFAULTS, toGray, discCentroid, grayMat, centreShift, quarterNorm,
       solveGlobal, warpToCanvas, buildAPs, discMaskMat, measureField,
       fillNaN, densify, ramps, subpixel,
       newAccumulator, accumulate, finishAcc, render,
+      innerMask, reliability, stackNoise, frameNoise, preview, halfMean,
     };
   }
 
