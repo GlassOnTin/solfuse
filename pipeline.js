@@ -32,6 +32,13 @@
       channel: 'green',
       multipoint: true,
       taper: 2.5,      // grid steps the correction survives past the last measurement; 0 disables
+      // 'centroid' | 'limb'. The limb fit is the geometrically correct answer
+      // for an occluded or clipped disc — on a partial eclipse the centroid sits
+      // 430 px from the true centre — and the fit itself is validated and fast
+      // (18-28 ms/frame). But driving the whole pipeline from it currently runs
+      // pathologically slowly for reasons not yet understood, so it is not the
+      // default and should be treated as unproven.
+      coarse: 'centroid',
     };
 
     // ---- input -------------------------------------------------------------
@@ -65,6 +72,134 @@
       }
       if (!n) return null;
       return { cx: sx / n, cy: sy / n, area: n, radius: Math.sqrt(n / Math.PI), peak: max };
+    }
+
+    // Boundary of the lit region, plus the centroid, in one pass. Boundary
+    // points that sit on the frame border are dropped: those are where the
+    // sensor cut the image, not where the Sun ends.
+    function discGeometry(gray, w, h, frac, stride) {
+      let max = 0;
+      for (let i = 0; i < gray.length; i++) if (gray[i] > max) max = gray[i];
+      const thr = Math.max(30, max * (frac === undefined ? DEFAULTS.discFrac : frac));
+      const lit = new Uint8Array(gray.length);
+      let n = 0, sx = 0, sy = 0;
+      for (let y = 0, i = 0; y < h; y++) {
+        for (let x = 0; x < w; x++, i++) {
+          if (gray[i] > thr) { lit[i] = 1; n++; sx += x; sy += y; }
+        }
+      }
+      if (!n) return null;
+      const st = stride || 3;
+      const edge = [];
+      let clipped = 0;
+      for (let y = 1; y < h - 1; y += st) {
+        for (let x = 1; x < w - 1; x++) {
+          const i = y * w + x;
+          if (!lit[i]) continue;
+          if (lit[i - 1] && lit[i + 1] && lit[i - w] && lit[i + w]) continue;
+          if (x < 3 || y < 3 || x > w - 4 || y > h - 4) { clipped++; continue; }
+          edge.push(x, y);
+        }
+      }
+      return { cx: sx / n, cy: sy / n, area: n, radius: Math.sqrt(n / Math.PI),
+               peak: max, edge, clipped };
+    }
+
+    // ---- solar limb fit ----------------------------------------------------
+    //
+    // The centroid of a lit region is only the disc centre when the disc is
+    // whole. Eclipsed, or cut by the frame edge, it is not — and it migrates as
+    // the Moon advances. The solar limb, by contrast, is a circle of fixed
+    // radius whatever is in front of it, so fitting that circle recovers the
+    // true centre from any visible arc.
+    //
+    // The catch during an eclipse is that the lunar limb is an arc of very
+    // similar radius. It is told apart geometrically: the lit region lies
+    // INSIDE the solar circle and OUTSIDE the lunar one.
+
+    // Circle through three points. Returns null if they are near-collinear.
+    function circumcircle(x1, y1, x2, y2, x3, y3) {
+      const d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
+      if (Math.abs(d) < 1e-6) return null;
+      const s1 = x1 * x1 + y1 * y1, s2 = x2 * x2 + y2 * y2, s3 = x3 * x3 + y3 * y3;
+      const cx = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / d;
+      const cy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / d;
+      return { cx, cy, r: Math.hypot(x1 - cx, y1 - cy) };
+    }
+
+    // Kasa algebraic fit: minimise sum (x^2 + y^2 + Dx + Ey + F)^2, linear in
+    // D, E, F, so it is a 3x3 solve rather than an iteration.
+    function fitCircleLS(pts, idx) {
+      let Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0, Sz = 0, Sxz = 0, Syz = 0;
+      const n = idx.length;
+      if (n < 3) return null;
+      for (const k of idx) {
+        const x = pts[2 * k], y = pts[2 * k + 1], z = x * x + y * y;
+        Sx += x; Sy += y; Sxx += x * x; Syy += y * y; Sxy += x * y;
+        Sz += z; Sxz += x * z; Syz += y * z;
+      }
+      const a = [[Sxx, Sxy, Sx], [Sxy, Syy, Sy], [Sx, Sy, n]];
+      const b = [-Sxz, -Syz, -Sz];
+      for (let i = 0; i < 3; i++) {                    // Gaussian elimination
+        let p = i;
+        for (let j = i + 1; j < 3; j++) if (Math.abs(a[j][i]) > Math.abs(a[p][i])) p = j;
+        if (Math.abs(a[p][i]) < 1e-12) return null;
+        [a[i], a[p]] = [a[p], a[i]]; [b[i], b[p]] = [b[p], b[i]];
+        for (let j = i + 1; j < 3; j++) {
+          const f = a[j][i] / a[i][i];
+          for (let k = i; k < 3; k++) a[j][k] -= f * a[i][k];
+          b[j] -= f * b[i];
+        }
+      }
+      const sol = [0, 0, 0];
+      for (let i = 2; i >= 0; i--) {
+        let t = b[i];
+        for (let k = i + 1; k < 3; k++) t -= a[i][k] * sol[k];
+        sol[i] = t / a[i][i];
+      }
+      const cx = -sol[0] / 2, cy = -sol[1] / 2;
+      const rr = cx * cx + cy * cy - sol[2];
+      if (!(rr > 0)) return null;
+      return { cx, cy, r: Math.sqrt(rr) };
+    }
+
+    // Deterministic PRNG so a rerun gives the same fit.
+    function lcg(seed) {
+      let s = seed >>> 0;
+      return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296);
+    }
+
+    function fitLimb(geom, o) {
+      const opt = Object.assign({ tol: 2.5, iters: 400, minInliers: 0.15, rHint: null, rTol: 0.25 }, o || {});
+      const pts = geom.edge, n = pts.length / 2;
+      if (n < 30) return null;
+      const rnd = lcg(0x5f3759df ^ n);
+      let best = null;
+      for (let it = 0; it < opt.iters; it++) {
+        const i = (rnd() * n) | 0, j = (rnd() * n) | 0, k = (rnd() * n) | 0;
+        if (i === j || j === k || i === k) continue;
+        const c = circumcircle(pts[2*i], pts[2*i+1], pts[2*j], pts[2*j+1], pts[2*k], pts[2*k+1]);
+        if (!c) continue;
+        if (opt.rHint && Math.abs(c.r - opt.rHint) > opt.rTol * opt.rHint) continue;
+        // The lit region must lie inside a solar limb. This is what separates it
+        // from the lunar limb, which has a similar radius but the opposite sense.
+        if (Math.hypot(geom.cx - c.cx, geom.cy - c.cy) > c.r) continue;
+        let inl = 0;
+        for (let p = 0; p < n; p++) {
+          const dx = pts[2*p] - c.cx, dy = pts[2*p+1] - c.cy;
+          if (Math.abs(Math.hypot(dx, dy) - c.r) < opt.tol) inl++;
+        }
+        if (!best || inl > best.inl) best = { c, inl };
+      }
+      if (!best || best.inl < opt.minInliers * n) return null;
+      const idx = [];
+      for (let p = 0; p < n; p++) {
+        const dx = pts[2*p] - best.c.cx, dy = pts[2*p+1] - best.c.cy;
+        if (Math.abs(Math.hypot(dx, dy) - best.c.r) < opt.tol) idx.push(p);
+      }
+      const ref = fitCircleLS(pts, idx) || best.c;
+      return { cx: ref.cx, cy: ref.cy, r: ref.r, inliers: idx.length, points: n,
+               fraction: idx.length / n };
     }
 
     const grayMat = (gray, w, h) => {
@@ -101,8 +236,29 @@
     // refined by ECC. ECC's warp maps template to input, so it is inverted
     // before composing — getting this backwards doubles the error instead of
     // removing it, and looks superficially plausible.
-    function solveGlobal(gray, w, h, refQuarter, o) {
+    // The coarse centre. A centroid is excellent on a whole disc and wrong on a
+    // crescent — measured 430 px from the true centre on a partial eclipse —
+    // where the limb circle is right by construction. Neither is universally
+    // better, so which one is used is a decision, not a constant.
+    function coarseCentre(gray, w, h, o, rHint) {
+      if (o.coarse === 'limb') {
+        const geom = discGeometry(gray, w, h, o.discFrac, o.edgeStride || 3);
+        if (!geom) return null;
+        const L = fitLimb(geom, { rHint });
+        if (L) return { cx: L.cx, cy: L.cy, radius: L.r, area: geom.area,
+                        method: 'limb', inlierFraction: L.fraction };
+        // Fall back rather than fail: a limb fit needs a visible arc.
+        return { cx: geom.cx, cy: geom.cy, radius: geom.radius, area: geom.area,
+                 method: 'centroid-fallback' };
+      }
       const c = discCentroid(gray, w, h, o.discFrac);
+      if (!c) return null;
+      c.method = 'centroid';
+      return c;
+    }
+
+    function solveGlobal(gray, w, h, refQuarter, o, rHint) {
+      const c = coarseCentre(gray, w, h, o, rHint);
       if (!c) return null;
       const src = grayMat(gray, w, h);
       const M = centreShift(c.cx, c.cy, o.canvas);
@@ -637,6 +793,7 @@
       fillNaN, densify, ramps, subpixel,
       newAccumulator, accumulate, finishAcc, render,
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean,
+      discGeometry, fitLimb, fitCircleLS, circumcircle, coarseCentre,
       FRACTIONS, frameQuality, newCurve, accumulateCurve, curveResult,
     };
   }

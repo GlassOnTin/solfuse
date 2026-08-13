@@ -21,6 +21,7 @@ const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] :
 const LIMIT = Number(opt('--frames', 0)) || Infinity;
 const WRITE = opt('--write', null);
 const TAPER = opt('--taper', null);
+const COARSE = opt('--coarse', null);
 
 if (!SRC) { console.error('usage: bench-solar.js <video> [--frames N] [--write DIR]'); process.exit(1); }
 
@@ -61,15 +62,16 @@ function frameReader(file, w, h) {
   const P = createPipeline(cv);
   const o = Object.assign({}, P.DEFAULTS);
   if (TAPER != null) o.taper = Number(TAPER);
+  if (COARSE) o.coarse = COARSE;
   const { w, h, n } = probe(SRC);
   const N = Math.min(LIMIT, n || Infinity);
-  console.log(`SolFuse harness — ${SRC}, ${w}x${h}, ${N} of ${n} frames, canvas ${o.canvas}\n`);
+  console.log(`SolFuse harness — ${SRC}, ${w}x${h}, ${N} of ${n} frames, canvas ${o.canvas}, coarse ${o.coarse}\n`);
 
   // ---- pass 1: global alignment, and the reference it produces -------------
   let t0 = Date.now();
   const acc1 = P.newAccumulator(o.canvas, true);
   const transforms = [];
-  let refQuarter = null, shifts = [], eccFail = 0;
+  let refQuarter = null, shifts = [], eccFail = 0, rHint = null;
   const r1 = frameReader(SRC, w, h);
   for (let i = 0; i < N; i++) {
     const gray = await r1.next();
@@ -82,7 +84,8 @@ function frameReader(file, w, h) {
       refQuarter = P.quarterNorm(warp, o.quarter);
       warp.delete();
     }
-    const g = P.solveGlobal(gray, w, h, refQuarter, o);
+    const g = P.solveGlobal(gray, w, h, refQuarter, o, rHint);
+    if (g && g.centroid && g.centroid.method === 'limb' && rHint == null) rHint = g.centroid.radius;
     if (!g) { transforms.push(null); continue; }
     if (!g.ecc) eccFail++;
     shifts.push(g.shift);
