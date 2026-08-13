@@ -256,6 +256,11 @@ function measureQuality(finalLin) {
     if (g) q.globalSNR = g.snr, q.globalR = g.r;
     if (mp) q.multiSNR = mp.snr, q.multiR = mp.r;
     if (g && mp) { q.snrGain = mp.snr / g.snr; q.saturated = g.saturated || mp.saturated; }
+    // The other end of the same problem: r near zero means the measured region
+    // holds almost no fine detail, so the SNR figures describe the target, not
+    // the alignment. Measured on an eclipse crescent, whose interior is blank
+    // photosphere: fine r = 0.27 while coarse r = 0.96 and the stack was sharp.
+    if (g && g.r < 0.5) q.starved = true;
 
     const active = mp ? acc2 : acc1;
     const sFull = P.stackNoise(active, mask);

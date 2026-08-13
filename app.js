@@ -137,6 +137,22 @@ function extractFrames(onFrame, onProgress, rate) {
   });
 }
 
+// requestVideoFrameCallback only fires while the tab is visible, and Chrome
+// defers media loading in hidden tabs entirely — a hidden tab sits at
+// readyState 0 forever with no error. A full run takes many minutes, so
+// switching away is likely, and without this the app would simply appear to
+// hang. Verified: a hidden tab reports document.hidden true and never loads.
+let hiddenDuringRun = false;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && busy) {
+    hiddenDuringRun = true;
+    say('Paused — this tab must stay visible. The browser stops delivering video frames to background tabs; ' +
+        'come back to this tab and it will continue.', true);
+  } else if (!document.hidden && busy && hiddenDuringRun) {
+    say('Resumed.');
+  }
+});
+
 // Green channel only. The disc through a white-light filter carries no colour,
 // and sending one plane instead of four cuts the transfer to the worker by 75%.
 function greenPlane(rgba, w, h) {
@@ -282,6 +298,11 @@ async function run() {
   setStage(1);
   setProgress(1, 'Starting engine…');
 
+  if (document.hidden) {
+    fail('This tab has to be visible to read the video — browsers do not deliver frames to background tabs.');
+    busy = false; go.disabled = false; bar.classList.remove('on');
+    return;
+  }
   const w = video.videoWidth, h = video.videoHeight;
   const opts = options();
   const dur = video.duration || 1;
@@ -364,6 +385,10 @@ function finish(res, ref, p1, p2) {
   detail.textContent = bits.slice(1).join(' · ');
   showStats(res, ref, p1, p2);
 
+  if (hiddenDuringRun) {
+    detail.textContent += ' · tab was hidden during the run, so frames may have been missed';
+    hiddenDuringRun = false;
+  }
   const dropped = (p1.dropped || 0) + (p2.dropped || 0);
   if (dropped > 0) {
     say(`${bits[0]} — but the decoder dropped ${dropped} frame${dropped > 1 ? 's' : ''}. ` +
@@ -418,8 +443,10 @@ function showStats(res, ref, p1, p2) {
     add('Multi-point gain', '×' + q.snrGain.toFixed(2),
         q.saturated
           ? 'Correlation is above 0.995 in this band, where r/(1−r) amplifies rounding into percentage points. Treat this figure as indicative only.'
-          : q.snrGain > 1.05 ? 'The second pass earned its keep on this clip.'
-                             : 'Little gained here — the seeing was steady, or the frames are too compressed to improve.');
+          : q.starved
+            ? 'Correlation is low because there is little fine-scale structure to reproduce — normal for a blank stretch of photosphere or an eclipse crescent, and not a sign the alignment failed. Check the coarse-scale figures and the image itself.'
+            : q.snrGain > 1.05 ? 'The second pass earned its keep on this clip.'
+                               : 'Little gained here — the seeing was steady, or the frames are too compressed to improve.');
   }
   if (q.error) add('Statistics', 'unavailable', q.error);
 
