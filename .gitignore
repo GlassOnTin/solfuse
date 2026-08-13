@@ -1,0 +1,4 @@
+testdata/*.mp4
+testdata/out/
+testdata/truth.json
+scratch/

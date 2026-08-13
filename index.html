@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SolFuse — stack solar video in your browser</title>
+<script>
+// Classic and inline, first thing on the page: it has to keep working when the
+// module below fails to load, which is the one failure a user cannot diagnose —
+// the page renders normally and simply does nothing.
+window.__sf = { log: [], booted: false };
+(function () {
+  function show(msg) {
+    var el = document.getElementById('status');
+    if (!el) { document.addEventListener('DOMContentLoaded', function () { show(msg); }, { once: true }); return; }
+    el.textContent = msg; el.className = 'err';
+    var btn = document.getElementById('copyDiag');
+    if (btn) btn.hidden = false;
+  }
+  function record(kind, msg, where) {
+    window.__sf.log.push(new Date().toISOString().slice(11, 19) + ' ' + kind + ': ' + msg + (where ? ' @ ' + where : ''));
+    if (window.__sf.log.length > 25) window.__sf.log.shift();
+    show(msg);
+  }
+  window.__sf.record = record;
+  window.addEventListener('error', function (e) {
+    if (e.target && e.target !== window && e.target.tagName) {
+      record('load failed', 'Could not load ' + (e.target.src || e.target.href || e.target.tagName) + ' — reload the page.');
+      return;
+    }
+    record('error', e.message || 'Unknown error', e.filename ? e.filename.replace(/.*\//, '') + ':' + e.lineno : '');
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    record('unhandled', (e.reason && e.reason.message) || String(e.reason));
+  });
+  setTimeout(function () {
+    if (!window.__sf.booted) record('startup', 'The app did not start — a script failed to load. Try reloading.');
+  }, 8000);
+  window.__sf.details = function () {
+    return ['SolFuse diagnostics', 'url: ' + location.href, 'ua: ' + navigator.userAgent,
+            'cores: ' + (navigator.hardwareConcurrency || '?'),
+            'deviceMemory: ' + (navigator.deviceMemory || '?') + ' GB',
+            'rVFC: ' + !!HTMLVideoElement.prototype.requestVideoFrameCallback,
+            'booted: ' + window.__sf.booted, ''].concat(window.__sf.log).join('\n');
+  };
+})();
+</script>
+<meta name="description" content="Stack a solar or planetary video into one clean image. Multi-point alignment corrects atmospheric distortion. Runs entirely on your device — no upload.">
+<style>
+:root {
+  --bg: #14100c; --panel: #1e1913; --line: #33291f; --ink: #f0eae2;
+  --dim: #a89880; --accent: #ffb454; --accent-ink: #1e1204; --bad: #ff6b6b;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--ink); line-height: 1.5;
+       font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 900px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -.02em; }
+h1 span { color: var(--accent); }
+.sub { color: var(--dim); margin: 0 0 24px; }
+button, select, input[type=range] { font: inherit; }
+button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px;
+         padding: 10px 18px; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+#drop { border: 2px dashed var(--line); border-radius: 14px; padding: 40px 20px; text-align: center;
+        cursor: pointer; transition: border-color .15s, background .15s; }
+#drop.over { border-color: var(--accent); background: #ffb45410; }
+#drop p { margin: 6px 0 0; color: var(--dim); font-size: .9rem; }
+#meta { color: var(--dim); font-size: .85rem; margin: 12px 0 0; }
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 16px 0; }
+.row label { display: flex; gap: 6px; align-items: center; color: var(--dim); }
+details { border: 1px solid var(--line); border-radius: 10px; padding: 0 14px; margin: 16px 0; background: var(--panel); }
+details summary { cursor: pointer; padding: 12px 0; font-weight: 600; }
+details[open] summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+.ctl { display: grid; grid-template-columns: 150px 1fr 56px; gap: 10px; align-items: center; margin-bottom: 10px; }
+.ctl span:first-child { color: var(--dim); font-size: .88rem; }
+.ctl output { color: var(--dim); font-size: .82rem; text-align: right; font-variant-numeric: tabular-nums; }
+.ctl input[type=range] { width: 100%; accent-color: var(--accent); }
+.hint { color: var(--dim); font-size: .8rem; margin: -4px 0 12px; }
+#bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; display: none; }
+#bar.on { display: block; }
+#bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+#status { color: var(--dim); font-size: .88rem; min-height: 1.4em; margin-top: 8px; }
+#status.err { color: var(--bad); }
+#detail { color: var(--dim); font-size: .8rem; font-variant-numeric: tabular-nums; }
+#preview { margin-top: 8px; line-height: 0; }
+#out { width: 100%; border-radius: 10px; background: #000; display: block; }
+#vid { display: none; }
+footer { color: var(--dim); font-size: .82rem; margin-top: 48px; border-top: 1px solid var(--line); padding-top: 16px; }
+footer a { color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sol<span>Fuse</span></h1>
+  <p class="sub">Stack a solar video into one clean image. Nothing leaves your device.</p>
+
+  <div id="drop" tabindex="0" role="button" aria-label="Choose a video">
+    <strong>Drop a solar video here</strong>
+    <p>or click to choose &middot; MP4 / MOV / WebM &middot; anything your browser can play</p>
+    <input id="file" type="file" accept="video/*" hidden>
+  </div>
+  <p id="meta" hidden></p>
+
+  <div class="row">
+    <button id="go" disabled>Stack</button>
+    <label><input id="doMulti" type="checkbox" checked> Multi-point alignment</label>
+    <label>Output
+      <select id="canvas">
+        <option value="1400">1400 px</option>
+        <option value="2100" selected>2100 px</option>
+        <option value="2800">2800 px</option>
+      </select>
+    </label>
+  </div>
+
+  <div id="bar"><i></i></div>
+  <p id="status"></p>
+  <p id="detail"></p>
+  <button id="copyDiag" class="ghost" hidden>Copy error details</button>
+
+  <div id="preview" hidden><canvas id="out"></canvas></div>
+
+  <div class="row" id="exports" hidden>
+    <button id="dlPng">Download PNG</button>
+    <button id="dlJpg" class="ghost">JPEG</button>
+  </div>
+
+  <details id="adv">
+    <summary>Advanced</summary>
+    <div class="ctl"><span>Sharpening</span><input type="range" id="sharpen" min="0" max="2.5" step="0.05" value="0"><output>0.00</output></div>
+    <p class="hint">Unsharp mask over the stacked result. Stacking removes the noise that would otherwise be amplified, which is what makes sharpening worth doing at all.</p>
+    <div class="ctl"><span>Sharpen radius</span><input type="range" id="radius" min="0.8" max="6" step="0.1" value="2.4"><output>2.40</output></div>
+    <div class="ctl"><span>Point spacing</span><input type="range" id="step" min="60" max="210" step="10" value="100"><output>100</output></div>
+    <p class="hint">Grid pitch for multi-point alignment, in output pixels. Closer follows the distortion more finely and takes longer. Must divide the output size.</p>
+    <div class="ctl"><span>Search radius</span><input type="range" id="search" min="6" max="24" step="1" value="12"><output>12</output></div>
+    <p class="hint">How far each point may move, in pixels. Measured distortion on a 4K tripod clip was about 2 px, so the default is generous.</p>
+  </details>
+
+  <video id="vid" muted playsinline preload="auto"></video>
+
+  <footer>
+    Runs on <a href="https://opencv.org/">OpenCV</a> compiled to WebAssembly, in a Web Worker, on this device.
+    No server, no upload, no analytics.<br>
+    SolFuse &middot; <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a>
+    &middot; <a href="https://github.com/GlassOnTin/solfuse">source</a>
+    &middot; <a href="https://ko-fi.com/glassontin">Ko-fi &#9749;</a>
+  </footer>
+</main>
+<script>
+document.getElementById('copyDiag').addEventListener('click', function () {
+  var text = window.__sf.details(), btn = this;
+  var done = function (ok) { btn.textContent = ok ? 'Copied' : 'Press and hold to copy'; setTimeout(function () { btn.textContent = 'Copy error details'; }, 3000); };
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+  else done(false);
+});
+</script>
+<!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
+     worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
+<script src="app.js?v=1" type="module"></script>
+</body>
+</html>
