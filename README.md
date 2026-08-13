@@ -167,6 +167,34 @@ For a capture where lucky imaging would pay, use manual exposure with the
 fastest shutter the filter allows and accept the ISO: stacking removes sensor
 noise, but nothing removes seeing blur baked into an exposure.
 
+### Two things this measurement got wrong
+
+Recorded because both were caught by checking rather than by reasoning, and both
+would otherwise have shipped as facts.
+
+**The displacement field was inflated by cells that measured nothing.** Only
+about 40% of grid cells carry a locatable alignment point — 182 of 441 on a 4K
+disc. The rest were filled by propagating the nearest measurement outward with
+no decay, which invents motion over empty sky beyond the limb. Measured cells
+carried a median 0.32 px displacement; the filled ones carried 0.74 px, more
+than double. The field is now tapered to zero within 2.5 grid steps of the last
+real measurement, which halves the reported magnitude (2.24 → 1.12 px median on
+300 frames) and makes the number mean what it says.
+
+**The coarse-band SNR ratio was never evidence.** A full 1140-frame run showed
+multi-point alignment scoring 0.938× against global alignment in the 7–15 px
+band — apparently worse. The taper above was the obvious suspect, so it was
+A/B tested at 300 frames: with and without, the coarse gain came out 1.193×
+against 1.194×. The taper was not the cause.
+
+The real cause is the metric. `SNR = r/(1−r)` diverges as r approaches 1, and
+the coarse band sat at r = 0.9984 against 0.9983 — a difference of 1×10⁻⁴,
+amplified into a 6% swing. Correlations above about 0.995 carry no usable
+information in this form, in either direction, and are now flagged as such
+wherever they are reported. The fine band, where r runs 0.96–0.99, is the one to
+read: it gives 1.24× at 300 frames and 1.31× at 1140, against the Python
+prototype's 1.34×.
+
 ### Browser against headless
 
 The browser and the node harness run the same `pipeline.js`. On the same 40 real

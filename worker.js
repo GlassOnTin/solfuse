@@ -136,7 +136,7 @@ const handlers = {
         const f = P.measureField(warped, aps, NG, O);
         used = f.used;
         stats.used.push(f.used);
-        const gx = P.fillNaN(f.gx, NG), gy = P.fillNaN(f.gy, NG);
+        const gx = P.fillNaN(f.gx, NG, O.taper), gy = P.fillNaN(f.gy, NG, O.taper);
         let sum = 0;
         for (let k = 0; k < gx.length; k++) sum += Math.hypot(gx[k], gy[k]);
         mag = sum / gx.length;
@@ -255,7 +255,7 @@ function measureQuality(finalLin) {
     const mp = acc2 && acc2.frames ? P.reliability(acc2, O.canvas, mask, 1.4, 3.2) : null;
     if (g) q.globalSNR = g.snr, q.globalR = g.r;
     if (mp) q.multiSNR = mp.snr, q.multiR = mp.r;
-    if (g && mp) q.snrGain = mp.snr / g.snr;
+    if (g && mp) { q.snrGain = mp.snr / g.snr; q.saturated = g.saturated || mp.saturated; }
 
     const active = mp ? acc2 : acc1;
     const sFull = P.stackNoise(active, mask);

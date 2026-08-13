@@ -416,8 +416,10 @@ function showStats(res, ref, p1, p2) {
   }
   if (q.snrGain != null) {
     add('Multi-point gain', '×' + q.snrGain.toFixed(2),
-        q.snrGain > 1.05 ? 'The second pass earned its keep on this clip.'
-                         : 'Little gained here — the seeing was steady, or the frames are too compressed to improve.');
+        q.saturated
+          ? 'Correlation is above 0.995 in this band, where r/(1−r) amplifies rounding into percentage points. Treat this figure as indicative only.'
+          : q.snrGain > 1.05 ? 'The second pass earned its keep on this clip.'
+                             : 'Little gained here — the seeing was steady, or the frames are too compressed to improve.');
   }
   if (q.error) add('Statistics', 'unavailable', q.error);
 

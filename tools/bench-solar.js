@@ -20,6 +20,7 @@ const SRC = args[0];
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
 const LIMIT = Number(opt('--frames', 0)) || Infinity;
 const WRITE = opt('--write', null);
+const TAPER = opt('--taper', null);
 
 if (!SRC) { console.error('usage: bench-solar.js <video> [--frames N] [--write DIR]'); process.exit(1); }
 
@@ -59,6 +60,7 @@ function frameReader(file, w, h) {
   const cv = await Promise.resolve(require('../vendor/opencv.js'));
   const P = createPipeline(cv);
   const o = Object.assign({}, P.DEFAULTS);
+  if (TAPER != null) o.taper = Number(TAPER);
   const { w, h, n } = probe(SRC);
   const N = Math.min(LIMIT, n || Infinity);
   console.log(`SolFuse harness — ${SRC}, ${w}x${h}, ${N} of ${n} frames, canvas ${o.canvas}\n`);
@@ -117,7 +119,7 @@ function frameReader(file, w, h) {
     const warped = P.warpToCanvas(gray, w, h, transforms[i], o.canvas);
     const f = P.measureField(warped, aps, NG, o);
     usedTotal += f.used;
-    const gx = P.fillNaN(f.gx, NG), gy = P.fillNaN(f.gy, NG);
+    const gx = P.fillNaN(f.gx, NG, o.taper), gy = P.fillNaN(f.gy, NG, o.taper);
     let mag = 0;
     for (let k = 0; k < gx.length; k++) mag += Math.hypot(gx[k], gy[k]);
     fieldMag.push(mag / gx.length);
@@ -183,8 +185,10 @@ function frameReader(file, w, h) {
     const rg = corr(bandOf(half(acc1, 'odd'), s1, s2), bandOf(half(acc1, 'even'), s1, s2));
     const rm = corr(bandOf(half(acc2, 'odd'), s1, s2), bandOf(half(acc2, 'even'), s1, s2));
     const sg = rg / (1 - rg), sm = rm / (1 - rm);
+    // Flag saturation rather than printing a confident ratio built on 1e-4.
+    const sat = Math.max(rg, rm) > 0.995 ? '  (r saturated — not evidence)' : '';
     console.log(`  ${nm.padEnd(15)} ${rg.toFixed(4).padStart(8)} ${rm.toFixed(4).padStart(12)} ` +
-                `${sg.toFixed(1).padStart(12)} ${sm.toFixed(1).padStart(10)} ${(sm / sg).toFixed(3).padStart(11)}x`);
+                `${sg.toFixed(1).padStart(12)} ${sm.toFixed(1).padStart(10)} ${(sm / sg).toFixed(3).padStart(11)}x${sat}`);
   }
 
   if (WRITE) {

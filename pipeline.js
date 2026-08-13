@@ -31,6 +31,7 @@
       discFrac: 0.45,     // disc threshold as a fraction of peak brightness
       channel: 'green',
       multipoint: true,
+      taper: 2.5,      // grid steps the correction survives past the last measurement; 0 disables
     };
 
     // ---- input -------------------------------------------------------------
@@ -257,10 +258,27 @@
     }
 
     // Unmeasured points take the mean of their measured neighbours, spreading
-    // inward until the grid is full.
-    function fillNaN(g, NG) {
+    // outward — but fading to zero as they go.
+    //
+    // Only about 40% of grid cells sit on a locatable alignment point; the rest
+    // are outside the disc or over featureless photosphere. Propagating the
+    // nearest measurement into them without decay invents motion where none was
+    // observed: measured cells carry a median 0.32 px displacement while the
+    // filled ones carried 0.74 px, and those inflated values warp the outer
+    // canvas. That cost the coarse band more than multi-point alignment gained
+    // it, turning a 1.49x improvement into 0.94x.
+    //
+    // TAPER sets how many grid steps the correction survives beyond the last
+    // real measurement. Past that the field is zero, which is the honest
+    // statement: nothing was measured there, so nothing is corrected there.
+    const TAPER = 2.5;
+
+    function fillNaN(g, NG, taper) {
+      const T = taper == null ? TAPER : taper;
       const a = Float32Array.from(g);
-      for (let pass = 0; pass < 60; pass++) {
+      const depth = new Int16Array(NG * NG).fill(-1);
+      for (let i = 0; i < a.length; i++) if (!Number.isNaN(a[i])) depth[i] = 0;
+      for (let pass = 1; pass <= 60; pass++) {
         let bad = 0;
         const next = Float32Array.from(a);
         for (let j = 0; j < NG; j++) {
@@ -274,13 +292,16 @@
               const v = a[y * NG + x];
               if (!Number.isNaN(v)) { s += v; n++; }
             }
-            if (n) next[k] = s / n; else bad++;
+            if (n) { next[k] = s / n; depth[k] = pass; } else bad++;
           }
         }
         a.set(next);
         if (!bad) break;
       }
-      for (let i = 0; i < a.length; i++) if (Number.isNaN(a[i])) a[i] = 0;
+      for (let i = 0; i < a.length; i++) {
+        if (Number.isNaN(a[i])) { a[i] = 0; continue; }
+        if (depth[i] > 0) a[i] *= T > 0 ? Math.max(0, 1 - depth[i] / T) : 1;
+      }
       return a;
     }
 
@@ -443,7 +464,11 @@
       const r = correlate(bandOf(halfMean(acc, 'odd'), canvas, s1, s2),
                           bandOf(halfMean(acc, 'even'), canvas, s1, s2), mask);
       if (r === null || !(r < 1)) return null;
-      return { r, snr: r / (1 - r) };
+      // SNR = r/(1-r) blows up as r approaches 1: at r = 0.998 a difference of
+      // 1e-4 between two stacks swings the ratio by 6%, which is how a coarse
+      // band once reported multi-point alignment as 0.94x when a 300-frame A/B
+      // put it at 1.19x. Past this point the number is not evidence.
+      return { r, snr: r / (1 - r), saturated: r > 0.995 };
     }
 
     const sdOverMask = (a, mask) => {
