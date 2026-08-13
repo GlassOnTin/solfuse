@@ -475,6 +475,112 @@
       return sdOverMask(d, mask);
     }
 
+    // ---- the selection trade-off -------------------------------------------
+    //
+    // Lucky imaging says keep the sharpest few percent of frames; plain
+    // averaging says keep everything. Which is right depends on the footage, so
+    // rather than assume, measure both ends and everything between.
+    //
+    // The statistic is reproducible fine-detail amplitude at each keep fraction:
+    //
+    //     A(f) = sqrt(r_f) * rms_fine(stack of the best f)
+    //
+    // Split-half SNR on its own cannot answer this. Blur is reproducible, so r
+    // keeps climbing as blurrier frames are added and pure SNR would always
+    // conclude "use everything" however bad the seeing was. The sqrt(r) factor
+    // discounts noise while rms_fine falls when blurred frames dilute the
+    // detail, so the product peaks at the genuine balance point.
+
+    const FRACTIONS = [0.02, 0.05, 0.10, 0.25, 0.50, 1.00];
+
+    // Per-frame quality, on a full-resolution crop at the disc centre. Mid-band
+    // energy over high-band energy: real solar structure is mid-band and both
+    // sensor and codec noise are broadband, so the ratio ranks by sharpness
+    // rather than by how grainy a frame happens to be. Ranking on raw
+    // high-frequency energy instead selects the noisiest frames — measured.
+    function frameQuality(warped, canvas, size) {
+      const s = Math.min(size || 700, canvas);
+      const x0 = ((canvas - s) / 2) | 0;
+      const roi = warped.roi(new cv.Rect(x0, x0, s, s));
+      const f = new cv.Mat();
+      roi.convertTo(f, cv.CV_32F);
+      const a = new cv.Mat(), b = new cv.Mat(), c = new cv.Mat(), d = new cv.Mat();
+      cv.GaussianBlur(f, a, new cv.Size(0, 0), 1.4);
+      cv.GaussianBlur(f, b, new cv.Size(0, 0), 3.2);
+      cv.subtract(a, b, a);
+      cv.GaussianBlur(f, c, new cv.Size(0, 0), 0.6);
+      cv.GaussianBlur(f, d, new cv.Size(0, 0), 1.2);
+      cv.subtract(c, d, c);
+      let mid = 0, hi = 0;
+      const A = a.data32F, C = c.data32F;
+      for (let i = 0; i < A.length; i++) { mid += A[i] * A[i]; hi += C[i] * C[i]; }
+      roi.delete(); f.delete(); a.delete(); b.delete(); c.delete(); d.delete();
+      return mid / (hi + 1e-9);
+    }
+
+    // Nested accumulators, one per keep fraction, over a small region of
+    // interest. A frame in the best 2% also belongs to every larger fraction, so
+    // one pass in presentation order fills all of them.
+    function newCurve(size, cx, cy) {
+      return {
+        size, cx, cy,
+        sets: FRACTIONS.map(() => ({
+          sum: new Float32Array(size * size),
+          odd: new Float32Array(size * size),
+          even: new Float32Array(size * size),
+          n: 0, nOdd: 0, nEven: 0,
+        })),
+      };
+    }
+
+    function accumulateCurve(curve, warped, rankFrac, seq) {
+      const s = curve.size;
+      const x0 = Math.max(0, Math.min(warped.cols - s, (curve.cx - s / 2) | 0));
+      const y0 = Math.max(0, Math.min(warped.rows - s, (curve.cy - s / 2) | 0));
+      const roi = warped.roi(new cv.Rect(x0, y0, s, s));
+      const buf = new Uint8Array(roi.data);      // roi is a view; copy to read rows contiguously
+      roi.delete();
+      for (let k = 0; k < FRACTIONS.length; k++) {
+        if (rankFrac > FRACTIONS[k]) continue;   // this frame is not in the best f
+        const set = curve.sets[k];
+        const half = seq % 2 ? set.odd : set.even;
+        for (let i = 0; i < buf.length; i++) { set.sum[i] += buf[i]; half[i] += buf[i]; }
+        set.n++;
+        if (seq % 2) set.nOdd++; else set.nEven++;
+      }
+    }
+
+    function curveResult(curve) {
+      const out = [];
+      for (let k = 0; k < FRACTIONS.length; k++) {
+        const set = curve.sets[k];
+        if (set.n < 4 || set.nOdd < 2 || set.nEven < 2) continue;
+        const s = curve.size;
+        const mean = new Float32Array(set.sum.length);
+        for (let i = 0; i < mean.length; i++) mean[i] = set.sum[i] / set.n;
+        const o = new Float32Array(set.odd.length), e = new Float32Array(set.even.length);
+        for (let i = 0; i < o.length; i++) { o[i] = set.odd[i] / set.nOdd; e[i] = set.even[i] / set.nEven; }
+        const full = new Uint8Array(mean.length).fill(1);
+        const r = correlate(bandOf(o, s, 1.4, 3.2), bandOf(e, s, 1.4, 3.2), full);
+        const fine = bandOf(mean, s, 1.4, 3.2);
+        let sq = 0;
+        for (let i = 0; i < fine.length; i++) sq += fine[i] * fine[i];
+        const rms = Math.sqrt(sq / fine.length);
+        if (r === null || !(r > 0)) continue;
+        out.push({ fraction: FRACTIONS[k], frames: set.n, r, rms, amplitude: Math.sqrt(r) * rms });
+      }
+      if (!out.length) return null;
+      let best = out[0];
+      for (const p of out) if (p.amplitude > best.amplitude) best = p;
+      const all = out[out.length - 1];
+      return {
+        points: out,
+        bestFraction: best.fraction,
+        bestFrames: best.frames,
+        gainOverAll: all.amplitude > 0 ? best.amplitude / all.amplitude : null,
+      };
+    }
+
     // Cheap downsample for the live preview: integer stride and a min/max
     // stretch, so it costs a fraction of a full render and can run mid-stack.
     function preview(lin, canvas, size) {
@@ -506,6 +612,7 @@
       fillNaN, densify, ramps, subpixel,
       newAccumulator, accumulate, finishAcc, render,
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean,
+      FRACTIONS, frameQuality, newCurve, accumulateCurve, curveResult,
     };
   }
 

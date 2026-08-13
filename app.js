@@ -264,6 +264,7 @@ const options = () => ({
   multipoint: $('doMulti').checked,
   step: Number($('step').value),
   search: Number($('search').value),
+  curve: $('doCurve').checked,
 });
 
 const renderOpts = () => ({
@@ -420,12 +421,54 @@ function showStats(res, ref, p1, p2) {
   }
   if (q.error) add('Statistics', 'unavailable', q.error);
 
+  const cv = res.curve;
+  if (cv && cv.points.length > 1) {
+    head('Selection trade-off');
+    const best = cv.points.find((p) => p.fraction === cv.bestFraction);
+    const pct = (f) => (f >= 1 ? 'all' : (f * 100).toFixed(f < 0.1 ? 0 : 0) + '%');
+    add('Best keep fraction', `${pct(cv.bestFraction)} (${cv.bestFrames} frames)`,
+        cv.bestFraction >= 1
+          ? 'Averaging wins outright here: every frame improves the result, so selection has nothing to offer.'
+          : cv.gainOverAll > 1.02
+            ? `Keeping only the sharpest ${pct(cv.bestFraction)} beat using everything by ${((cv.gainOverAll - 1) * 100).toFixed(0)}% — this footage rewards lucky imaging.`
+            : 'The peak is inside the range but the curve is flat, so selection is not worth the frames it discards.');
+    if (cv.gainOverAll != null) {
+      add('Gain over using every frame', '×' + cv.gainOverAll.toFixed(3),
+          'Reproducible fine detail at the best fraction, against the same measure using all frames.');
+    }
+    rows.push(['__curve', cv, '']);
+  }
+
   $('statTable').innerHTML = rows.map(([k, v, note]) =>
     k === '__head'
       ? `<tr class="head"><td colspan="2">${v}</td></tr>`
-      : `<tr><td>${k}</td><td class="v">${v}${note ? `<div class="note">${note}</div>` : ''}</td></tr>`
+      : k === '__curve'
+        ? `<tr><td colspan="2">${curveTable(v)}</td></tr>`
+        : `<tr><td>${k}</td><td class="v">${v}${note ? `<div class="note">${note}</div>` : ''}</td></tr>`
   ).join('');
   $('stats').hidden = false;
+}
+
+// The whole curve, as a bar per keep fraction. Seeing the shape matters more
+// than the winning number: a sharp peak means the seeing varied and selection
+// pays, a flat rise to 100% means it does not.
+function curveTable(cv) {
+  const max = Math.max(...cv.points.map((p) => p.amplitude));
+  const pct = (f) => (f >= 1 ? 'all' : (f * 100).toFixed(0) + '%');
+  const bars = cv.points.map((p) => {
+    const w = (100 * p.amplitude) / max;
+    const win = p.fraction === cv.bestFraction;
+    return `<div class="crow">
+      <span class="clab">${pct(p.fraction)}</span>
+      <span class="cbar"><i style="width:${w.toFixed(1)}%${win ? ';background:var(--accent)' : ''}"></i></span>
+      <span class="cval">${p.amplitude.toFixed(3)}${win ? ' ◀' : ''}</span>
+      <span class="cn">${p.frames}f</span>
+    </div>`;
+  }).join('');
+  return `<div class="curve">${bars}</div>
+    <div class="note">Reproducible fine detail, A = √r × rms, at each keep fraction.
+    Split-half SNR alone cannot decide this: blur is reproducible, so r keeps rising
+    as blurrier frames are added and it would always favour using everything.</div>`;
 }
 
 // --- before/after wipe ----------------------------------------------------

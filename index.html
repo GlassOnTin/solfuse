@@ -127,6 +127,14 @@ details[open] summary { border-bottom: 1px solid var(--line); margin-bottom: 12p
    td.note left every explanation rendered in bold. */
 #statTable .note { color: var(--dim); font-weight: 400; font-size: .82rem; margin-top: 2px; }
 #statTable tr.head td { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
+.curve { margin: 4px 0 8px; }
+.crow { display: grid; grid-template-columns: 46px 1fr 62px 46px; gap: 8px; align-items: center;
+        font-size: .82rem; margin-bottom: 3px; font-variant-numeric: tabular-nums; }
+.clab { color: var(--dim); text-align: right; }
+.cbar { background: #ffffff10; border-radius: 3px; height: 12px; overflow: hidden; }
+.cbar i { display: block; height: 100%; background: #6f5a3e; }
+.cval { color: var(--ink); }
+.cn { color: var(--dim); }
 footer { color: var(--dim); font-size: .82rem; margin-top: 48px; border-top: 1px solid var(--line); padding-top: 16px; }
 footer a { color: var(--dim); }
 </style>
@@ -146,6 +154,7 @@ footer a { color: var(--dim); }
   <div class="row">
     <button id="go" disabled>Stack</button>
     <label><input id="doMulti" type="checkbox" checked> Multi-point alignment</label>
+    <label><input id="doCurve" type="checkbox" checked> Measure selection trade-off</label>
     <label>Output
       <select id="canvas">
         <option value="1400">1400 px</option>
@@ -242,6 +251,6 @@ document.getElementById('copyDiag').addEventListener('click', function () {
 </script>
 <!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
      worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
-<script src="app.js?v=7" type="module"></script>
+<script src="app.js?v=8" type="module"></script>
 </body>
 </html>

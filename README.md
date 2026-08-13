@@ -58,6 +58,47 @@ structure appears in both, noise does not, so r/(1−r) is a signal-to-noise
 ratio, and the ratio between the global and multi-point stacks is what the
 second pass actually bought.
 
+### The selection trade-off
+
+Lucky imaging says keep the sharpest few percent; averaging says keep
+everything. Which is right depends on the footage, so SolFuse measures the whole
+curve instead of assuming, and reports where the balance actually falls.
+
+Frames are ranked in pass 1 by a noise-normalised band-limited metric. In pass 2
+a full-resolution region of interest — centred on the highest-contrast alignment
+point, because measuring detail over blank photosphere measures nothing — is
+accumulated into nested keep-fraction stacks, each with its own odd/even halves.
+The statistic reported at each fraction is
+
+```
+A(f) = √r_f × rms_fine(stack of the best f)
+```
+
+**Split-half SNR on its own cannot answer this question.** Blur is reproducible:
+as blurrier frames are added, noise falls and `r` keeps climbing, so an SNR curve
+would conclude "use everything" no matter how much the seeing varied. The `√r`
+factor discounts noise while `rms_fine` falls when blurred frames dilute the
+detail, so the product peaks at the genuine balance point.
+
+Measured on 60 frames of C0013:
+
+| keep | frames | r | rms | A |
+|---|---|---|---|---|
+| 10% | 6 | 0.9978 | 6.719 | 6.712 |
+| 25% | 15 | 0.9991 | 6.773 | 6.770 |
+| 50% | 30 | 0.9997 | 6.792 | 6.791 |
+| all | 60 | 0.9999 | 6.845 | **6.845** |
+
+Monotonic to 100%: averaging wins outright, and the gain from selecting is
+×1.000. That agrees with the earlier finding that selection buys about 1%,
+reached by an entirely different measure — two independent methods giving the
+same answer.
+
+One caveat on reading the curve: on a high-contrast target `r` saturates near 1,
+as it does above, so the comparison is carried almost entirely by `rms` and the
+`√r` term does little work. On noisier footage, or a fainter target, it matters
+much more. The curve costs about 13% on pass 1 and can be turned off.
+
 ## Measured behaviour
 
 All figures come from **C0013.MP4**: 1140 frames of real 4K solar video, 25 fps,

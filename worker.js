@@ -33,6 +33,9 @@ let ramp = null, mapx = null, mapy = null;
 let globMean = null, mpaMean = null;
 let firstFrame = null;      // first aligned frame, kept for the before/after and the noise estimate
 let stats = { ecc: 0, shifts: [], used: [], field: [] };
+let quality = [];        // per-frame sharpness from pass 1, keyed by index
+let rankOf = null;       // index -> its quality rank as a fraction in (0,1]
+let curve = null;        // nested keep-fraction accumulators over a small ROI
 let PREVIEW_EVERY = 20;
 
 const post = (m, t) => self.postMessage(m, t || []);
@@ -58,6 +61,7 @@ function freeAll() {
   if (aps) { for (const a of aps) { if (a.tmpl) a.tmpl.delete(); } aps = null; }
   acc1 = acc2 = null; transforms = []; globMean = mpaMean = null;
   ramp = mapx = mapy = null; firstFrame = null;
+  quality = []; rankOf = null; curve = null;
   stats = { ecc: 0, shifts: [], used: [], field: [] };
 }
 
@@ -116,6 +120,7 @@ const handlers = {
       transforms[m.index] = g.C;
       const warped = P.warpToCanvas(gray, W, H, g.C, O.canvas);
       if (!firstFrame) firstFrame = Float32Array.from(warped.data);
+      if (O.curve) quality[m.index] = P.frameQuality(warped, O.canvas, 700);
       P.accumulate(acc1, warped.data, m.seq);
       warped.delete();
       if (duePreview(acc1.frames)) sendPreview(acc1, 1, null);
@@ -144,9 +149,11 @@ const handlers = {
         const out = new cv.Mat();
         cv.remap(warped, out, mx, my, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
         P.accumulate(acc2, out.data, m.seq);
+        if (curve && rankOf) P.accumulateCurve(curve, out, rankOf.get(m.index) ?? 1, m.seq);
         mx.delete(); my.delete(); out.delete();
       } else {
         P.accumulate(acc2, warped.data, m.seq);
+        if (curve && rankOf) P.accumulateCurve(curve, warped, rankOf.get(m.index) ?? 1, m.seq);
       }
       warped.delete();
       if (duePreview(acc2.frames)) sendPreview(acc2, 2, grid);
@@ -171,6 +178,26 @@ const handlers = {
       mapy = new Float32Array(O.canvas * O.canvas);
       acc2 = P.newAccumulator(O.canvas, true);
     }
+    // Rank the frames pass 1 graded, so pass 2 knows which keep-fractions each
+    // frame belongs to. The ROI for the trade-off curve is centred on the
+    // best-contrast alignment point: measuring reproducible detail over blank
+    // photosphere would be measuring nothing.
+    if (O.curve) {
+      const graded = [];
+      quality.forEach((q, i) => { if (q != null) graded.push([i, q]); });
+      if (graded.length >= 8) {
+        graded.sort((a, b) => b[1] - a[1]);              // sharpest first
+        rankOf = new Map();
+        graded.forEach(([i], k) => rankOf.set(i, (k + 1) / graded.length));
+        let cx = O.canvas / 2, cy = O.canvas / 2;
+        if (aps && aps.length) {
+          const best = aps.reduce((p, a) => (a.contrast > p.contrast ? a : p), aps[0]);
+          cx = best.x; cy = best.y;
+        }
+        curve = P.newCurve(Math.min(512, O.canvas), cx, cy);
+      }
+    }
+
     const sh = stats.shifts.slice().sort((a, b) => a - b);
     // Alignment-point positions go to the UI so the grid can be drawn over the
     // preview: it is the clearest way to show what "multi-point" means, and
@@ -201,6 +228,7 @@ const handlers = {
            fieldMedian: field.length ? field[field.length >> 1] : null,
            eccFailures: stats.ecc,
            quality: measureQuality(lin),
+           curve: curve ? P.curveResult(curve) : null,
            mem: memory() }, [buf, bbuf]);
   },
 
