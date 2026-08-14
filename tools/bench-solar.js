@@ -72,13 +72,16 @@ function frameReader(file, w, h) {
   const acc1 = P.newAccumulator(o.canvas, true);
   const transforms = [];
   let refQuarter = null, shifts = [], eccFail = 0, rHint = null;
+  const eccReasons = new Map();
   const r1 = frameReader(SRC, w, h);
   for (let i = 0; i < N; i++) {
     const gray = await r1.next();
     if (!gray) break;
     if (!refQuarter) {
       // First frame defines the canvas registration; everything else lands on it.
-      const c = P.discCentroid(gray, w, h, o.discFrac);
+      // It MUST use the same coarse method as the frames, or every frame starts
+      // an entire disc-width away from the reference and ECC cannot converge.
+      const c = P.coarseCentre(gray, w, h, o, null);
       const warp = P.warpToCanvas(gray, w, h,
         [1, 0, o.canvas / 2 - c.cx, 0, 1, o.canvas / 2 - c.cy], o.canvas);
       refQuarter = P.quarterNorm(warp, o.quarter);
@@ -87,7 +90,7 @@ function frameReader(file, w, h) {
     const g = P.solveGlobal(gray, w, h, refQuarter, o, rHint);
     if (g && g.centroid && g.centroid.method === 'limb' && rHint == null) rHint = g.centroid.radius;
     if (!g) { transforms.push(null); continue; }
-    if (!g.ecc) eccFail++;
+    if (!g.ecc) { eccFail++; if (eccReasons.size < 4 && g.eccError) eccReasons.set(g.eccError, (eccReasons.get(g.eccError)||0)+1); }
     shifts.push(g.shift);
     transforms.push(g.C);
     const m = P.warpToCanvas(gray, w, h, g.C, o.canvas);
@@ -100,6 +103,7 @@ function frameReader(file, w, h) {
   shifts.sort((a, b) => a - b);
   console.log(`\r  pass 1: ${acc1.frames} frames in ${((Date.now() - t0) / 1000).toFixed(0)}s, ` +
               `ECC failures ${eccFail}, median refinement ${shifts[shifts.length >> 1].toFixed(2)} px`);
+  for (const [why, n] of eccReasons) console.log(`    ECC failed ${n}x: ${why}`);
 
   // ---- alignment points, cut from the low-noise reference ------------------
   const refMat = cv.matFromArray(o.canvas, o.canvas, cv.CV_32F, Array.from(globMean));

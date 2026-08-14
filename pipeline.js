@@ -269,13 +269,19 @@
       coarse.delete();
 
       const W = cv.Mat.eye(2, 3, cv.CV_32F);
-      let ok = true;
+      let ok = true, eccError = null;
       try {
         cv.findTransformECC(refQuarter, q, W, cv.MOTION_EUCLIDEAN,
           new cv.TermCriteria(cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 60, 1e-5),
           new cv.Mat(), 5);
       } catch (e) {
-        ok = false;                       // keep the centroid solution
+        // Keep the coarse solution, but record WHY. Swallowing this made an ECC
+        // failure indistinguishable from a successful zero correction, and cost
+        // a long debugging session on the limb path.
+        ok = false;
+        eccError = (typeof e === 'number' && cv.exceptionFromPtr)
+          ? (() => { try { return cv.exceptionFromPtr(e).msg; } catch { return 'wasm ' + e; } })()
+          : ((e && e.message) || String(e));
       }
       q.delete();
 
@@ -293,7 +299,7 @@
       const C = [ia, ib, ia * m02 + ib * m12 + itx,
                  id, ie, id * m02 + ie * m12 + ity];
       src.delete();
-      return { C, centroid: c, ecc: ok, shift: Math.hypot(tx, ty) };
+      return { C, centroid: c, ecc: ok, eccError, shift: Math.hypot(tx, ty) };
     }
 
     function warpToCanvas(gray, w, h, C, canvas) {

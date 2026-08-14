@@ -246,6 +246,34 @@ On this footage the choice barely matters anyway: every method reached ECC
 correlation 0.99938 with zero failures. The coarse stage is not the bottleneck.
 The framing is.
 
+### The coarse stage is not the limiting factor
+
+Four coarse registration methods were tried against a partial eclipse — a
+crescent, clipped by the sensor, drifting 580 px in 27 seconds — because that is
+the case where a centre-of-mass estimate should be at its worst.
+
+| method | ECC left to fix | final fine r | final coarse r |
+|---|---|---|---|
+| centroid | 2.23 px | 0.1437 | 0.8815 |
+| solar limb circle | 7.49 px | 0.1411 | 0.8825 |
+| cross-correlation | 3.24–3.30 px | — | — |
+| phase correlation | fails | — | — |
+
+Matched at 60 frames, centroid and limb produce stacks that agree to three or
+four decimal places in every band. The limb fit is *geometrically* the correct
+answer — the centroid sits 430 px from the true solar centre on a crescent, and
+migrates as the Moon advances — but ECC absorbs the difference and the finished
+image does not care.
+
+So the coarse stage earns robustness, not quality. It matters only when ECC
+cannot converge at all: building the reference with a different coarse method
+from the frames put every frame an entire disc-width from the reference and
+failed ECC on 100% of frames. Fixing that took the failure rate to zero.
+
+The practical rule is therefore a fallback rather than a quality selector: use
+the centroid, and switch to the limb fit if the ECC failure rate is high.
+Choosing between methods on final quality would be selecting on noise.
+
 ### Browser against headless
 
 The browser and the node harness run the same `pipeline.js`. On the same 40 real
