@@ -288,6 +288,42 @@ carries the warning; a full disc, whose only hard edge is the sun's own limb,
 tolerates far more than an occulted one does. 20 iterations at 2100 px with a
 41x41 kernel takes about 3.5 s.
 
+### Deconvolution does not work, and the split-half test could not tell
+
+Two negative results, both worth more than the feature would have been.
+
+**Split-half cannot validate a deconvolution.** Deconvolving the odd- and
+even-frame half-stacks independently and measuring reproducible amplitude
+A = sqrt(r) x rms reported that 40 iterations improved the fine band by **112x**.
+That is not credible, and the reason is structural: deconvolution artefacts are a
+deterministic function of the underlying structure, which both halves share, so
+ringing correlates exactly as well as real detail does. Split-half separates
+*random* error from signal. It is blind to *systematic* error. It was the right
+tool for multi-point alignment and the wrong one here.
+
+**Against ground truth, Richardson–Lucy makes the image worse.** A known sharp
+scene, blurred with a known PSF, with no noise at all:
+
+| setting | RMSE vs truth | fine-band r with truth | fine rms (truth 1.870) |
+|---|---|---|---|
+| blurred input | **2.685** | 0.9483 | 0.787 |
+| RL 5 | 2.799 | 0.9414 | 1.931 |
+| RL 10 | 9.637 | 0.8358 | 4.580 |
+| RL 20 | 42.165 | 0.7227 | 20.533 |
+| RL 40 | 124.457 | 0.6813 | 40.260 |
+| RL 20 + TV 0.002 | 16.851 | **-0.0797** | 4.091 |
+
+Error rises monotonically, correlation with the truth falls monotonically, and
+the fine-band amplitude reaches 40 against a true 1.87 — structure is being
+manufactured, not recovered. Repeating at noise sigma 0.0, 0.2 and 1.0 changes
+almost nothing, so this is not noise amplification. The total-variation variant
+is *anticorrelated* with the truth, which means that term is wrong as written.
+
+The feature is left in the UI, off by default and labelled as broken, because
+the diagnosis is worth finishing. What was earlier described here as "rings at
+hard edges" was too generous: it does not work at all. The PSF measurement is
+independently validated by re-projection and is unaffected by any of this.
+
 ### Deconvolution stability, and what the anti-ringing measures were worth
 
 **The deconvolution first released was diverging, not ringing.** Richardson–Lucy

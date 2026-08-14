@@ -80,6 +80,7 @@ details[open] summary { border-bottom: 1px solid var(--line); margin-bottom: 12p
 .ctl output { color: var(--dim); font-size: .82rem; text-align: right; font-variant-numeric: tabular-nums; }
 .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
 .hint { color: var(--dim); font-size: .8rem; margin: -4px 0 12px; }
+.warn { color: var(--bad); font-size: .82rem; }
 #bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; display: none; }
 #bar.on { display: block; }
 #bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
@@ -241,6 +242,7 @@ footer a { color: var(--dim); }
     </div>
     <div class="row" style="margin:10px 0 0">
       <button id="psfGo" class="ghost">Measure the PSF</button>
+      <span class="warn">Deconvolution below is <strong>known to be broken</strong> — see the note.</span>
       <label>Ringing control
         <select id="tv">
           <option value="0" selected>support + saturation</option>
@@ -259,10 +261,14 @@ footer a { color: var(--dim); }
       </label>
       <span class="hint" id="deconvNote" style="margin:0"></span>
     </div>
-    <p class="hint" style="margin-top:8px">Richardson–Lucy, using the measured PSF above — never an assumed
-      one. It rings at hard edges: on an eclipse the lunar limb grows a bright overshoot line and the dark
-      disc mottles, clearly visible by 20 iterations. Start at 5 and stop when the limb starts to glow.
-      A full disc, whose only hard edge is the sun's own limb, tolerates far more.</p>
+    <p class="hint" style="margin-top:8px"><strong>Do not trust this yet.</strong> Tested against synthetic
+      ground truth — a known sharp scene, blurred with a known PSF, with no noise at all — Richardson–Lucy
+      here moves <em>away</em> from the truth at every setting: RMSE 2.69 blurred, 2.80 at 5 iterations,
+      9.6 at 10, 42 at 20, 124 at 40, while fine-band correlation with the truth falls from 0.948 to 0.68
+      and the fine-band amplitude runs to 40 against a true 1.87. It is manufacturing structure, not
+      recovering it, and the total-variation variant comes out anticorrelated with the truth. Left in place
+      because the diagnosis is worth finishing, not because it works. The PSF measurement above is
+      independently validated and is unaffected.</p>
   </section>
 
   <section id="stats" hidden>
@@ -316,6 +322,6 @@ document.getElementById('copyDiag').addEventListener('click', function () {
 </script>
 <!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
      worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
-<script src="app.js?v=18" type="module"></script>
+<script src="app.js?v=19" type="module"></script>
 </body>
 </html>
