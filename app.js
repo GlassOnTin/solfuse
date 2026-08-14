@@ -328,7 +328,7 @@ const renderOpts = () => ({
   sharpenRadius: Number($('radius').value),
   wavelet: ['wav0', 'wav1', 'wav2', 'wav3'].map((id) => Number($(id).value)),
   deconv: Number($('deconv').value),
-  tv: Number($('tv').value),
+  tv: 0,   // the TV term as implemented measurably worsens the result
 });
 
 async function run() {
@@ -699,7 +699,7 @@ $('dlJpg').addEventListener('click', () => save('jpg', 'image/jpeg', 0.95));
 
 // Sharpening only changes the render, so it reuses the stack already in memory.
 let t = null;
-for (const id of ['sharpen', 'radius', 'wav0', 'wav1', 'wav2', 'wav3', 'deconv', 'tv']) {
+for (const id of ['sharpen', 'radius', 'wav0', 'wav1', 'wav2', 'wav3', 'deconv']) {
   $(id).addEventListener('input', () => {
     if (busy || exports.hidden || !worker) return;
     clearTimeout(t);

@@ -288,41 +288,47 @@ carries the warning; a full disc, whose only hard edge is the sun's own limb,
 tolerates far more than an occulted one does. 20 iterations at 2100 px with a
 41x41 kernel takes about 3.5 s.
 
-### Deconvolution does not work, and the split-half test could not tell
+### Deconvolution works, at two iterations
 
-Two negative results, both worth more than the feature would have been.
+Two corrections to what this file said earlier, both mine.
 
 **Split-half cannot validate a deconvolution.** Deconvolving the odd- and
-even-frame half-stacks independently and measuring reproducible amplitude
-A = sqrt(r) x rms reported that 40 iterations improved the fine band by **112x**.
-That is not credible, and the reason is structural: deconvolution artefacts are a
-deterministic function of the underlying structure, which both halves share, so
-ringing correlates exactly as well as real detail does. Split-half separates
-*random* error from signal. It is blind to *systematic* error. It was the right
-tool for multi-point alignment and the wrong one here.
+even-frame half-stacks independently and measuring A = sqrt(r) x rms reported
+that 40 iterations improved the fine band by **112x**. Not credible, and the
+reason is structural: deconvolution artefacts are a deterministic function of the
+underlying structure, which both halves share, so ringing correlates exactly as
+well as real detail. Split-half separates *random* error from signal and is blind
+to *systematic* error. It was the right tool for multi-point alignment and the
+wrong one here. Ground truth is the only thing that answers this.
 
-**Against ground truth, Richardson–Lucy makes the image worse.** A known sharp
-scene, blurred with a known PSF, with no noise at all:
+**The earlier verdict of "does not work" was wrong, and the fault was in the
+sampling.** Tested at 5, 10, 20 and 40 iterations, every setting was worse than
+not deconvolving, so it looked broken. The useful range is 1 to 4:
 
-| setting | RMSE vs truth | fine-band r with truth | fine rms (truth 1.870) |
-|---|---|---|---|
-| blurred input | **2.685** | 0.9483 | 0.787 |
-| RL 5 | 2.799 | 0.9414 | 1.931 |
-| RL 10 | 9.637 | 0.8358 | 4.580 |
-| RL 20 | 42.165 | 0.7227 | 20.533 |
-| RL 40 | 124.457 | 0.6813 | 40.260 |
-| RL 20 + TV 0.002 | 16.851 | **-0.0797** | 4.091 |
+| iterations | RMSE vs truth | fine-band r with truth |
+|---|---|---|
+| blurred input | 2.634 | 0.9697 |
+| 1 | 1.954 | 0.9750 |
+| **2** | **1.424** | **0.9774** |
+| 3 | 1.542 | 0.9756 |
+| 4 | 2.441 | — |
+| 5 | 3.770 | worse than blurred |
+| 20 | 42.2 | catastrophic |
 
-Error rises monotonically, correlation with the truth falls monotonically, and
-the fine-band amplitude reaches 40 against a true 1.87 — structure is being
-manufactured, not recovered. Repeating at noise sigma 0.0, 0.2 and 1.0 changes
-almost nothing, so this is not noise amplification. The total-variation variant
-is *anticorrelated* with the truth, which means that term is wrong as written.
+At two iterations it is a genuine **1.85x** reduction in error, with correlation
+to the truth rising as well — so it is recovering detail, not manufacturing it.
+The clue that the code was sound had already appeared and was not followed: an RL
+loop started *at* the truth stayed there exactly, ratio and correction both
+1.0000, which is not the behaviour of a broken loop.
 
-The feature is left in the UI, off by default and labelled as broken, because
-the diagnosis is worth finishing. What was earlier described here as "rings at
-hard edges" was too generous: it does not work at all. The PSF measurement is
-independently validated by re-projection and is unaffected by any of this.
+Why the range is so narrow: deconvolution is ill-posed, and the PSF's response
+near Nyquist is so small that amplifying it by the required factor magnifies even
+float32 rounding error without limit. Adding noise at sigma 0, 0.2 and 1.0 barely
+moves the optimum, because ill-posedness rather than noise sets it.
+
+**Total variation, as implemented here, makes things worse** at every iteration
+count — RMSE 2.81 to 3.09 against 1.43 without it, and correlation to the truth
+down from 0.977 to 0.80. The control has been removed rather than left as a trap.
 
 ### Deconvolution stability, and what the anti-ringing measures were worth
 

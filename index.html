@@ -242,33 +242,25 @@ footer a { color: var(--dim); }
     </div>
     <div class="row" style="margin:10px 0 0">
       <button id="psfGo" class="ghost">Measure the PSF</button>
-      <span class="warn">Deconvolution below is <strong>known to be broken</strong> — see the note.</span>
-      <label>Ringing control
-        <select id="tv">
-          <option value="0" selected>support + saturation</option>
-          <option value="0.002">+ mild TV</option>
-          <option value="0.01">+ strong TV</option>
-        </select>
-      </label>
       <label>Deconvolve
         <select id="deconv">
-          <option value="0" selected>off</option>
-          <option value="5">5 iterations</option>
-          <option value="10">10 iterations</option>
-          <option value="20">20 iterations</option>
-          <option value="40">40 iterations</option>
+          <option value="0">off</option>
+          <option value="1">1 iteration</option>
+          <option value="2" selected>2 iterations (best measured)</option>
+          <option value="3">3 iterations</option>
+          <option value="4">4 iterations</option>
         </select>
       </label>
       <span class="hint" id="deconvNote" style="margin:0"></span>
     </div>
-    <p class="hint" style="margin-top:8px"><strong>Do not trust this yet.</strong> Tested against synthetic
-      ground truth — a known sharp scene, blurred with a known PSF, with no noise at all — Richardson–Lucy
-      here moves <em>away</em> from the truth at every setting: RMSE 2.69 blurred, 2.80 at 5 iterations,
-      9.6 at 10, 42 at 20, 124 at 40, while fine-band correlation with the truth falls from 0.948 to 0.68
-      and the fine-band amplitude runs to 40 against a true 1.87. It is manufacturing structure, not
-      recovering it, and the total-variation variant comes out anticorrelated with the truth. Left in place
-      because the diagnosis is worth finishing, not because it works. The PSF measurement above is
-      independently validated and is unaffected.</p>
+    <p class="hint" style="margin-top:8px">Richardson–Lucy with the measured PSF, plus two constraints the
+      geometry gives for free: regions known to be dark are held there, and clipped pixels are excluded
+      because they only bound the truth from below. <strong>Fewer iterations is better than more.</strong>
+      Against synthetic ground truth the optimum is 2 iterations — RMSE 1.43 against 2.64 for the blurred
+      input, a 1.85× improvement, with fine-band correlation to the truth rising from 0.970 to 0.977.
+      Three is slightly worse, five is worse than not deconvolving at all, and twenty is catastrophic.
+      Deconvolution is fundamentally ill-posed: the PSF's response near Nyquist is so small that even
+      rounding error gets amplified without limit, so the useful range is narrow.</p>
   </section>
 
   <section id="stats" hidden>
@@ -322,6 +314,6 @@ document.getElementById('copyDiag').addEventListener('click', function () {
 </script>
 <!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
      worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
-<script src="app.js?v=19" type="module"></script>
+<script src="app.js?v=20" type="module"></script>
 </body>
 </html>
