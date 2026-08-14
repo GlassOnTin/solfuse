@@ -240,6 +240,12 @@ const handlers = {
         if (lun && lun.inliers > 300) { source = 'lunar'; circle = lun; sign = +1; }
       }
     }
+    if (!circle) {
+      // Totality: a corona ring around a dark Moon. Neither sense test can
+      // separate the boundaries, so fit the inner one directly.
+      const inner = P.fitInnerLimb(geom, { iters: 4000 });
+      if (inner) { source = 'lunar (totality)'; circle = inner; sign = +1; }
+    }
     if (!circle) { post({ type: 'psf', error: 'No limb could be fitted.' }); return; }
     const prof = P.edgeProfile(g, O.canvas, O.canvas, circle, sign, {});
     if (!prof) { post({ type: 'psf', error: 'The limb was not clean enough to measure.' }); return; }

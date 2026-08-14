@@ -288,6 +288,36 @@ carries the warning; a full disc, whose only hard edge is the sun's own limb,
 tolerates far more than an occulted one does. 20 iterations at 2100 px with a
 41x41 kernel takes about 3.5 s.
 
+### Defocus versus seeing, told apart by shape
+
+Kurtosis of the line-spread function separates the two kinds of blur, and it
+does so cleanly on real footage:
+
+| clip | FWHM | kurtosis | verdict |
+|---|---|---|---|
+| C0082, partial eclipse, in focus | 9.8 px | **4.28** | heavy-tailed — seeing |
+| C0092, totality, poor focus | 21–31 px | **1.93** | flat-topped — defocus |
+
+An ideal uniform disc of confusion projects to a kurtosis of 1.80 and a gaussian
+to 3.00, so 1.93 is essentially at the defocus limit. That verdict is robust in
+a useful direction: any error in the fitted limb circle smears the averaged edge,
+and smearing convolves the profile *towards* a gaussian, pushing kurtosis up. A
+measurement of 1.93 despite that means the underlying PSF is at least this
+flat-topped, and probably flatter.
+
+The absolute width is less certain than the shape. Measured from a single frame
+the same clip reads 21 px FWHM, and from a 60-frame mean 31 px, because at a
+30 px-wide edge the fitted radius is poorly localised and the two methods
+disagree by about 30%. The shape verdict is stable across both; the width is not.
+
+**Totality needs its own limb finder.** The bright region is an annulus of corona
+around a dark Moon, so its centroid sits at the Moon's centre and the
+inside/outside sense test that separates the solar and lunar limbs cannot
+discriminate — both boundaries enclose the centroid, and every candidate is
+rejected. The lunar limb is then the *inner* boundary, and fitting those points
+alone recovers it. It is the only geometry here where the disc of interest is
+the dark one.
+
 ### Wavelet sharpening
 
 The à trous scheme Registax made standard. The image is split into octave bands

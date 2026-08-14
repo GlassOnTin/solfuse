@@ -169,6 +169,33 @@
       return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296);
     }
 
+    // Totality inverts the geometry: the bright region is an annulus of corona
+    // around a dark lunar disc, so its centroid sits at the Moon's centre and
+    // the inside/outside sense test cannot separate the two boundaries — both
+    // enclose the centroid, and fitLimb rejects everything.
+    //
+    // The lunar limb is then the INNER boundary: the boundary points nearer the
+    // centroid than the outer edge of the corona. Fitting those alone recovers
+    // it. This is the only geometry where the disc of interest is the dark one.
+    function fitInnerLimb(geom, o) {
+      const pts = geom.edge, n = pts.length / 2;
+      if (n < 60) return null;
+      const rad = new Float64Array(n);
+      for (let i = 0; i < n; i++) rad[i] = Math.hypot(pts[2*i] - geom.cx, pts[2*i+1] - geom.cy);
+      const sorted = Float64Array.from(rad).sort();
+      const cut = sorted[Math.floor(n * 0.45)];      // inner boundary of the ring
+      const inner = [];
+      for (let i = 0; i < n; i++) if (rad[i] <= cut) inner.push(pts[2*i], pts[2*i+1]);
+      if (inner.length < 120) return null;
+      // reuse the circle machinery, with the sense test disabled by centring the
+      // search on the inner points themselves
+      let sx = 0, sy = 0;
+      for (let i = 0; i < inner.length; i += 2) { sx += inner[i]; sy += inner[i+1]; }
+      const g2 = { edge: inner, cx: sx / (inner.length/2), cy: sy / (inner.length/2) };
+      // the inner-boundary centroid lies inside its own circle, so inside:true
+      return fitLimb(g2, Object.assign({ inside: true }, o || {}));
+    }
+
     function fitLimb(geom, o) {
       const opt = Object.assign({ tol: 2.5, iters: 400, minInliers: 0.15, rHint: null, rTol: 0.25,
                                   inside: true }, o || {});
@@ -1115,7 +1142,7 @@
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean, mat32F, releaseScratch,
       edgeProfile, psfFromProfile, richardsonLucy, bilinear,
       waveletSharpen,
-      discGeometry, fitLimb, fitCircleLS, circumcircle, coarseCentre, coverageOf,
+      discGeometry, fitLimb, fitInnerLimb, fitCircleLS, circumcircle, coarseCentre, coverageOf,
       FRACTIONS, frameQuality, newCurve, accumulateCurve, curveResult,
     };
   }
