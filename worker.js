@@ -30,7 +30,7 @@ let acc1 = null, acc2 = null;
 let refQuarter = null, ref8 = null, aps = null, NG = 0;
 let transforms = [];
 let ramp = null, mapx = null, mapy = null, mapMatX = null, mapMatY = null;
-let globMean = null, mpaMean = null, psf = null;
+let globMean = null, mpaMean = null, psf = null, psfCircles = null, psfSupport = null;
 let firstFrame = null;      // first aligned frame, kept for the before/after and the noise estimate
 let stats = { ecc: 0, shifts: [], used: [], field: [] };
 let quality = [];        // per-frame sharpness from pass 1, keyed by index
@@ -63,7 +63,7 @@ function freeAll() {
   if (mapMatX) { mapMatX.delete(); mapMatX = null; }
   if (mapMatY) { mapMatY.delete(); mapMatY = null; }
   ramp = mapx = mapy = null; firstFrame = null;
-  quality = []; rankOf = null; curve = null; psf = null;
+  quality = []; rankOf = null; curve = null; psf = null; psfCircles = null; psfSupport = null;
   stats = { ecc: 0, shifts: [], used: [], field: [] };
 }
 
@@ -252,6 +252,14 @@ const handlers = {
     const r = P.psfFromProfile(prof, {});
     if (!r) { post({ type: 'psf', error: 'Could not recover a PSF.' }); return; }
     psf = r;
+    // Regions the geometry says are dark: inside the Moon, outside the Sun.
+    // These are known, not inferred, and they are where deconvolution otherwise
+    // invents structure.
+    const regions = [];
+    if (source.startsWith('lunar')) regions.push({ cx: circle.cx, cy: circle.cy, r: circle.r, mode: 'inside' });
+    if (sol && source !== 'lunar (totality)') regions.push({ cx: sol.cx, cy: sol.cy, r: sol.r, mode: 'outside' });
+    psfCircles = { circle, sol, source, sign };
+    psfSupport = regions.length ? P.buildSupport(O.canvas, regions, 8) : null;
     const buf = Float32Array.from(r.psf).buffer;
     post({ type: 'psf', source, k: r.k, sigma: r.sigma, fwhm: r.fwhm,
            kurtosis: r.kurtosis, residual: r.residual, profiles: r.profiles,
@@ -278,6 +286,12 @@ const handlers = {
            fieldMedian: field.length ? field[field.length >> 1] : null,
            eccFailures: stats.ecc,
            quality: measureQuality(lin),
+           ringing: psfCircles ? (() => {
+             try {
+               const r0 = P.measureRinging(shown, O.canvas, psfCircles.circle, psfCircles.sign, {});
+               return r0 ? { overshoot: r0.overshoot, sigma: r0.overshootSigma } : null;
+             } catch (e) { return null; }
+           })() : null,
            curve: curve ? P.curveResult(curve) : null,
            mem: memory() }, [buf, bbuf]);
   },
@@ -333,7 +347,11 @@ function measureQuality(finalLin) {
 function deconvolved(lin, m) {
   const iters = Math.round(m && m.deconv || 0);
   if (!iters || !psf) return lin;
-  return P.richardsonLucy(lin, O.canvas, psf.psf, psf.k, iters);
+  return P.richardsonLucy(lin, O.canvas, psf.psf, psf.k, iters, {
+    satLevel: 254,                       // clipped pixels say "at least", not "exactly"
+    support: psfSupport, darkLevel: 0,
+    tv: (m && m.tv) || 0,
+  });
 }
 
 function memory() {

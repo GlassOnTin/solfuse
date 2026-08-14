@@ -288,6 +288,43 @@ carries the warning; a full disc, whose only hard edge is the sun's own limb,
 tolerates far more than an occulted one does. 20 iterations at 2100 px with a
 41x41 kernel takes about 3.5 s.
 
+### Deconvolution stability, and what the anti-ringing measures were worth
+
+**The deconvolution first released was diverging, not ringing.** Richardson–Lucy
+divides by the blurred estimate; in a dark sky that tends to zero, and with a
+1e-6 epsilon the ratio explodes. The result reached 900 DN of "overshoot" on an
+8-bit image. What looked like catastrophic ringing was a numerical blow-up.
+
+Three guards fix it: an epsilon scaled to the data rather than fixed, a cap on
+the per-iteration ratio, and a physical ceiling on the estimate. The last one
+matters most — capping the ratio at 4 still permits 4^20 over a 20-iteration run.
+With all three, output stays bounded: mean 44.2 to 40.1 DN over 20 iterations
+with 5% of pixels reaching the ceiling.
+
+Ringing is then measured rather than eyeballed, by sampling the radial profile
+across the fitted limb and taking the overshoot above the local plateau:
+
+| variant | overshoot | in sigma |
+|---|---|---|
+| stacked, no deconvolution | 1.01 DN | 1.2 |
+| plain RL, 20 iterations | 33.35 | 2.2 |
+| + saturation masking | 34.58 | 2.5 |
+| + support constraint | 35.53 | 2.5 |
+| + TV, lambda 0.002 | 33.06 | 3.4 |
+| + TV, lambda 0.01 | 32.50 | 4.2 |
+
+**Honest result: none of them helps much here.** Overshoot moves from 33.4 to
+32.5 DN, about 2%. The ringing at a hard occulting edge appears to be intrinsic
+to reconstructing a step from band-limited data, not something these priors
+remove. They are kept because each is physically correct — a clipped pixel really
+does only bound the truth from below, and the Moon's shadow really is dark — but
+the expected win did not materialise, and the table says so.
+
+The ringing metric itself is trustworthy on a crescent and **not** on totality,
+where it returns a degenerate zero because the corona falls off outward and the
+far-field "plateau" is dimmer than the near-limb signal. It is reported only
+where the geometry suits it.
+
 ### Defocus versus seeing, told apart by shape
 
 Kurtosis of the line-spread function separates the two kinds of blur, and it

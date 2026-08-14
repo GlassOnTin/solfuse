@@ -784,26 +784,171 @@
                residual: tv / 2, profiles: prof.used };
     }
 
-    // Richardson-Lucy: non-negative, multiplicative, and the standard choice for
-    // photon-limited data. Each iteration is two convolutions with the PSF.
-    function richardsonLucy(lin, canvas, psf, k, iters) {
+    // A support mask from the geometry already fitted. During an eclipse the
+    // Moon really is black and the sky beyond the solar limb really is empty, so
+    // those regions are known rather than inferred — and that is exactly where
+    // the ringing appeared. Constraining them removes it by construction instead
+    // of by smoothing everything.
+    //
+    // Edges are feathered: a hard support boundary is itself a step, and would
+    // simply move the ringing rather than remove it.
+    function buildSupport(canvas, regions, feather) {
+      const f = feather || 6;
+      const sup = new Float32Array(canvas * canvas).fill(1);
+      for (const reg of regions || []) {
+        const { cx, cy, r, mode } = reg;      // mode 'inside' | 'outside' is the DARK side
+        for (let y = 0, i = 0; y < canvas; y++) {
+          for (let x = 0; x < canvas; x++, i++) {
+            const d = Math.hypot(x - cx, y - cy) - r;
+            // signed distance into the dark region
+            const into = mode === 'inside' ? -d : d;
+            if (into <= 0) continue;
+            const t = Math.min(1, into / f);
+            const keep = 1 - t;
+            if (keep < sup[i]) sup[i] = keep;
+          }
+        }
+      }
+      return sup;
+    }
+
+    // Overshoot at a fitted limb, in units of the local noise. Ringing is
+    // otherwise judged by eye, and this conversation has shown repeatedly that
+    // eyes and badly-chosen metrics both mislead. With the circle already known,
+    // the radial profile gives the number directly — and an automatic place to
+    // stop iterating.
+    function measureRinging(lin, canvas, circle, sign, o) {
+      const span = (o && o.span) || 40, step = 0.25;
+      const n = Math.round((2 * span) / step) + 1;
+      const acc = new Float64Array(n);
+      let used = 0;
+      for (let a = 0; a < 1440; a++) {
+        const t = (a / 1440) * Math.PI * 2;
+        const nx = Math.cos(t) * sign, ny = Math.sin(t) * sign;
+        const px = circle.cx + Math.cos(t) * circle.r, py = circle.cy + Math.sin(t) * circle.r;
+        if (px < span + 2 || py < span + 2 || px > canvas - span - 2 || py > canvas - span - 2) continue;
+        for (let i = 0; i < n; i++) {
+          acc[i] += bilinear(lin, canvas, canvas, px + nx * (-span + i * step),
+                                                  py + ny * (-span + i * step));
+        }
+        used++;
+      }
+      if (!used) return null;
+      for (let i = 0; i < n; i++) acc[i] /= used;
+      // plateau on the bright side, measured well away from the edge
+      const tail = Math.round(n * 0.25);
+      let plateau = 0;
+      for (let i = n - tail; i < n; i++) plateau += acc[i];
+      plateau /= tail;
+      let dark = 0;
+      for (let i = 0; i < tail; i++) dark += acc[i];
+      dark /= tail;
+      // scatter of the plateau, as a noise yardstick
+      let v = 0;
+      for (let i = n - tail; i < n; i++) v += (acc[i] - plateau) ** 2;
+      const noise = Math.sqrt(v / tail) + 1e-6;
+      // peak excursion just inside the bright side, and just inside the dark side
+      let over = 0, under = 0;
+      const mid = n >> 1;
+      for (let i = mid; i < n - tail; i++) over = Math.max(over, acc[i] - plateau);
+      for (let i = tail; i < mid; i++) under = Math.max(under, dark - acc[i]);
+      return { overshoot: over, undershoot: under, plateau, dark, noise,
+               overshootSigma: over / noise, profile: Array.from(acc) };
+    }
+
+    // Richardson-Lucy, with the three things that stop it ringing on this data:
+    //
+    //   support     - regions known to be dark are held there, so the algorithm
+    //                 cannot invent structure in the Moon's shadow or the sky
+    //   saturation  - a clipped pixel says "at least this bright", not "exactly
+    //                 this"; correcting towards it makes the model fight data
+    //                 that cannot express the answer
+    //   tv          - total-variation regularisation, which suppresses ringing
+    //                 while preserving edges, unlike Tikhonov or Wiener which
+    //                 simply smooth
+    function richardsonLucy(lin, canvas, psf, k, iters, o) {
+      const opt = Object.assign({ support: null, darkLevel: 0, satLevel: 254, tv: 0 }, o || {});
       const img = mat32F(canvas, canvas, lin);
       const kern = mat32F(k, k, psf);
       const flip = new cv.Mat();
-      cv.flip(kern, flip, -1);                       // PSF mirrored, for the correction step
+      cv.flip(kern, flip, -1);
       let est = img.clone();
       const blur = new cv.Mat(), ratio = new cv.Mat(), corr = new cv.Mat();
+      // Scaled to the data, not a fixed 1e-6. Richardson-Lucy divides by the
+      // blurred estimate, and in a dark sky that tends to zero: with a tiny
+      // epsilon the ratio explodes and the result diverges to hundreds of DN on
+      // an 8-bit image. That looks like catastrophic ringing and is not.
+      let mean = 0;
+      for (let i = 0; i < lin.length; i++) mean += lin[i];
+      mean /= lin.length;
+      const floor = Math.max(1e-4, mean * 1e-3);
+      const eps = new cv.Mat(canvas, canvas, cv.CV_32F, new cv.Scalar(floor));
+      const ratioCap = (o && o.ratioCap) || 4;
+      let maxIn = 0;
+      for (let i = 0; i < lin.length; i++) if (lin[i] > maxIn) maxIn = lin[i];
+      const ceiling = (o && o.ceiling) || maxIn * 1.05;
       const anchor = new cv.Point(-1, -1);
+
+      // pixels at or above the clipping level carry no usable correction
+      const sat = [];
+      for (let i = 0; i < lin.length; i++) if (lin[i] >= opt.satLevel) sat.push(i);
+
+      const gx = new cv.Mat(), gy = new cv.Mat(), mag = new cv.Mat();
+      const nx = new cv.Mat(), ny = new cv.Mat(), dxx = new cv.Mat(), dyy = new cv.Mat();
+
       for (let it = 0; it < iters; it++) {
         cv.filter2D(est, blur, cv.CV_32F, kern, anchor, 0, cv.BORDER_REPLICATE);
-        cv.add(blur, new cv.Mat(blur.rows, blur.cols, blur.type(), new cv.Scalar(1e-6)), blur);
+        cv.add(blur, eps, blur);
         cv.divide(img, blur, ratio);
+        {
+          // Cap the correction. An unbounded multiplicative update is what makes
+          // RL unstable at low signal; the cap costs a little convergence speed
+          // and buys a result that stays finite.
+          const rd = ratio.data32F;
+          for (let i = 0; i < rd.length; i++) if (rd[i] > ratioCap) rd[i] = ratioCap;
+          for (const i of sat) rd[i] = 1;
+        }
         cv.filter2D(ratio, corr, cv.CV_32F, flip, anchor, 0, cv.BORDER_REPLICATE);
         cv.multiply(est, corr, est);
+
+        if (opt.tv > 0) {
+          // factor = 1 / (1 - lambda * div(grad u / |grad u|))
+          cv.Sobel(est, gx, cv.CV_32F, 1, 0, 3);
+          cv.Sobel(est, gy, cv.CV_32F, 0, 1, 3);
+          cv.magnitude(gx, gy, mag);
+          cv.add(mag, eps, mag);
+          cv.divide(gx, mag, nx);
+          cv.divide(gy, mag, ny);
+          cv.Sobel(nx, dxx, cv.CV_32F, 1, 0, 3);
+          cv.Sobel(ny, dyy, cv.CV_32F, 0, 1, 3);
+          cv.add(dxx, dyy, dxx);
+          const dv = dxx.data32F, ed = est.data32F;
+          for (let i = 0; i < ed.length; i++) {
+            let f = 1 / (1 - opt.tv * dv[i]);
+            if (!(f > 0.5)) f = 0.5; else if (f > 1.5) f = 1.5;   // keep it stable
+            ed[i] *= f;
+          }
+        }
+
+        {
+          // A physical ceiling. The scene has bounded brightness, and a
+          // multiplicative update next to a hard-zero sky otherwise compounds:
+          // capping the per-iteration ratio at 4 still allows 4^20 over a run.
+          const ed = est.data32F;
+          for (let i = 0; i < ed.length; i++) {
+            if (ed[i] > ceiling) ed[i] = ceiling;
+            else if (!(ed[i] >= 0)) ed[i] = 0;
+          }
+        }
+
+        if (opt.support) {
+          const ed = est.data32F, su = opt.support;
+          for (let i = 0; i < ed.length; i++) ed[i] = ed[i] * su[i] + opt.darkLevel * (1 - su[i]);
+        }
       }
       const out = Float32Array.from(est.data32F);
-      img.delete(); kern.delete(); flip.delete(); est.delete();
-      blur.delete(); ratio.delete(); corr.delete();
+      for (const m of [img, kern, flip, est, blur, ratio, corr, eps,
+                       gx, gy, mag, nx, ny, dxx, dyy]) m.delete();
       return out;
     }
 
@@ -1140,7 +1285,7 @@
       fillNaN, densify, ramps, subpixel,
       newAccumulator, accumulate, finishAcc, render,
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean, mat32F, releaseScratch,
-      edgeProfile, psfFromProfile, richardsonLucy, bilinear,
+      edgeProfile, psfFromProfile, richardsonLucy, bilinear, buildSupport, measureRinging,
       waveletSharpen,
       discGeometry, fitLimb, fitInnerLimb, fitCircleLS, circumcircle, coarseCentre, coverageOf,
       FRACTIONS, frameQuality, newCurve, accumulateCurve, curveResult,
