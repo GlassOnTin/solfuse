@@ -127,6 +127,16 @@ details[open] summary { border-bottom: 1px solid var(--line); margin-bottom: 12p
    td.note left every explanation rendered in bold. */
 #statTable .note { color: var(--dim); font-weight: 400; font-size: .82rem; margin-top: 2px; }
 #statTable tr.head td { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
+#psfbox { margin-top: 26px; }
+#psfbox h2 { font-size: 1rem; margin: 0 0 4px; }
+.psfrow { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+#psfImg, #psfProf { background: #000; border: 1px solid var(--line); border-radius: 6px; display: block;
+                    image-rendering: pixelated; }
+.psfcap { color: var(--dim); font-size: .72rem; text-align: center; margin-top: 3px; }
+#psfTable { border-collapse: collapse; font-size: .84rem; }
+#psfTable td { padding: 3px 10px 3px 0; vertical-align: top; }
+#psfTable td:first-child { color: var(--dim); }
+#psfTable td.v { font-variant-numeric: tabular-nums; font-weight: 600; }
 .curve { margin: 4px 0 8px; }
 .crow { display: grid; grid-template-columns: 46px 1fr 62px 46px; gap: 8px; align-items: center;
         font-size: .82rem; margin-bottom: 3px; font-variant-numeric: tabular-nums; }
@@ -213,6 +223,41 @@ footer a { color: var(--dim); }
            aria-label="Compare a single frame with the stacked result">
   </div>
 
+  <section id="psfbox" hidden>
+    <h2>Measured point spread function</h2>
+    <p class="hint">Recovered from a limb in your own stack — a step edge of known geometry, sampled
+      all the way around the arc. Nothing about its shape is assumed, so defocus, seeing and
+      scattering each look like what they are.</p>
+    <div class="psfrow">
+      <div>
+        <canvas id="psfImg" width="128" height="128"></canvas>
+        <div class="psfcap" id="psfCap">PSF</div>
+      </div>
+      <div>
+        <canvas id="psfProf" width="260" height="128"></canvas>
+        <div class="psfcap">radial profile (log)</div>
+      </div>
+      <table id="psfTable"></table>
+    </div>
+    <div class="row" style="margin:10px 0 0">
+      <button id="psfGo" class="ghost">Measure the PSF</button>
+      <label>Deconvolve
+        <select id="deconv">
+          <option value="0" selected>off</option>
+          <option value="5">5 iterations</option>
+          <option value="10">10 iterations</option>
+          <option value="20">20 iterations</option>
+          <option value="40">40 iterations</option>
+        </select>
+      </label>
+      <span class="hint" id="deconvNote" style="margin:0"></span>
+    </div>
+    <p class="hint" style="margin-top:8px">Richardson–Lucy, using the measured PSF above — never an assumed
+      one. It rings at hard edges: on an eclipse the lunar limb grows a bright overshoot line and the dark
+      disc mottles, clearly visible by 20 iterations. Start at 5 and stop when the limb starts to glow.
+      A full disc, whose only hard edge is the sun's own limb, tolerates far more.</p>
+  </section>
+
   <section id="stats" hidden>
     <h2>What this run achieved</h2>
     <p class="hint">Measured on your frames, not quoted. Odd and even frames are stacked
@@ -264,6 +309,6 @@ document.getElementById('copyDiag').addEventListener('click', function () {
 </script>
 <!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
      worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
-<script src="app.js?v=13" type="module"></script>
+<script src="app.js?v=16" type="module"></script>
 </body>
 </html>

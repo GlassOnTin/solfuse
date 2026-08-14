@@ -246,6 +246,48 @@ On this footage the choice barely matters anyway: every method reached ECC
 correlation 0.99938 with zero failures. The coarse stage is not the bottleneck.
 The framing is.
 
+### Deconvolution, with the PSF measured rather than assumed
+
+A limb is a step edge of known geometry, so its edge-spread function gives the
+point spread function directly. No parametric family is assumed and no PSF is
+optimised against a sharpness score — a score that would happily converge on
+amplified noise.
+
+Two details decide whether the answer is usable, and both were found by checking
+rather than reasoning:
+
+**Normalise each profile before averaging.** Limb darkening means the
+photosphere behind one part of the arc is not as bright as behind another.
+Binning by radius alone mixes those plateaux and smears the edge: it measured
+the blur 37% too wide, and the recovered PSF failed to re-project onto its own
+data. Rescaling each profile to its own dark and bright levels first took the
+re-projection error from **18.4% to 4.0%** and the FWHM from 14.28 to 10.45 px.
+
+**Prefer the lunar limb.** The Moon has no atmosphere and no limb darkening, so
+during an eclipse it is very nearly an ideal knife edge laid across the brightest
+object in the sky. Measured on the same stack, the solar limb reads **1.44x
+wider** — that excess is limb darkening, not blur.
+
+Recovery is by MTF rather than by fitting: for a radially symmetric system the
+MTF is the magnitude of the Fourier transform of the line-spread function, so
+rotating it into a 2D transfer function and inverting gives the PSF whatever its
+shape. A disc-convolved-gaussian fit was tried first and left a 17% residual;
+the transform route is assumption-free and validated by re-projection.
+
+Measured on the eclipse stack: **FWHM 9.81 px, sigma 4.17 px, kurtosis 4.28**
+from 1502 averaged edge profiles, in 408 ms. Kurtosis is the useful diagnostic:
+3.0 is gaussian, ~2.0–2.3 is the flat-topped disc of pure defocus, and above 3.6
+is the heavy-tailed profile of seeing. This clip is seeing-limited, not
+focus-limited.
+
+**Richardson–Lucy rings at hard edges, and it is not subtle.** At 20 iterations
+on the eclipse crescent the lunar limb grows a bright overshoot line and the dark
+lunar disc mottles visibly. Most of a 36 DN mean change was that artefact rather
+than recovered detail. Deconvolution is off by default, capped in the UI, and
+carries the warning; a full disc, whose only hard edge is the sun's own limb,
+tolerates far more than an occulted one does. 20 iterations at 2100 px with a
+41x41 kernel takes about 3.5 s.
+
 ### Wavelet sharpening
 
 The à trous scheme Registax made standard. The image is split into octave bands

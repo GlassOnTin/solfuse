@@ -30,7 +30,7 @@ let acc1 = null, acc2 = null;
 let refQuarter = null, ref8 = null, aps = null, NG = 0;
 let transforms = [];
 let ramp = null, mapx = null, mapy = null, mapMatX = null, mapMatY = null;
-let globMean = null, mpaMean = null;
+let globMean = null, mpaMean = null, psf = null;
 let firstFrame = null;      // first aligned frame, kept for the before/after and the noise estimate
 let stats = { ecc: 0, shifts: [], used: [], field: [] };
 let quality = [];        // per-frame sharpness from pass 1, keyed by index
@@ -63,7 +63,7 @@ function freeAll() {
   if (mapMatX) { mapMatX.delete(); mapMatX = null; }
   if (mapMatY) { mapMatY.delete(); mapMatY = null; }
   ramp = mapx = mapy = null; firstFrame = null;
-  quality = []; rankOf = null; curve = null;
+  quality = []; rankOf = null; curve = null; psf = null;
   stats = { ecc: 0, shifts: [], used: [], field: [] };
 }
 
@@ -216,10 +216,47 @@ const handlers = {
            medianRefine: sh.length ? sh[sh.length >> 1] : null });
   },
 
+  // The PSF is measured from a limb in the finished stack: a step edge of known
+  // geometry, sampled around the whole arc. The lunar limb is preferred when an
+  // eclipse provides one, because the Moon has no limb darkening and is
+  // therefore a far better knife edge than the Sun's own edge.
+  async measurePSF() {
+    if (!mpaMean) { post({ type: 'error', message: 'Nothing stacked yet.' }); return; }
+    const g = new Uint8Array(O.canvas * O.canvas);
+    for (let i = 0; i < g.length; i++) g[i] = Math.max(0, Math.min(255, mpaMean[i]));
+    const geom = P.discGeometry(g, O.canvas, O.canvas, O.discFrac, 1);
+    if (!geom) { post({ type: 'psf', error: 'No disc found.' }); return; }
+    const sol = P.fitLimb(geom, { inside: true, iters: 3000 });
+    let source = 'solar', circle = sol, sign = -1;
+    if (sol) {
+      // Anything not on the solar arc may be a lunar limb.
+      const rest = [];
+      for (let i = 0; i < geom.edge.length; i += 2) {
+        const dx = geom.edge[i] - sol.cx, dy = geom.edge[i + 1] - sol.cy;
+        if (Math.abs(Math.hypot(dx, dy) - sol.r) > 4) rest.push(geom.edge[i], geom.edge[i + 1]);
+      }
+      if (rest.length > 600) {
+        const lun = P.fitLimb(Object.assign({}, geom, { edge: rest }), { inside: false, iters: 4000 });
+        if (lun && lun.inliers > 300) { source = 'lunar'; circle = lun; sign = +1; }
+      }
+    }
+    if (!circle) { post({ type: 'psf', error: 'No limb could be fitted.' }); return; }
+    const prof = P.edgeProfile(g, O.canvas, O.canvas, circle, sign, {});
+    if (!prof) { post({ type: 'psf', error: 'The limb was not clean enough to measure.' }); return; }
+    const r = P.psfFromProfile(prof, {});
+    if (!r) { post({ type: 'psf', error: 'Could not recover a PSF.' }); return; }
+    psf = r;
+    const buf = Float32Array.from(r.psf).buffer;
+    post({ type: 'psf', source, k: r.k, sigma: r.sigma, fwhm: r.fwhm,
+           kurtosis: r.kurtosis, residual: r.residual, profiles: r.profiles,
+           radius: circle.r, psf: buf }, [buf]);
+  },
+
   async finish(m) {
     const lin = O.multipoint && acc2 && acc2.frames ? P.finishAcc(acc2) : globMean;
     mpaMean = lin;
-    const r = P.render(lin, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
+    const shown = deconvolved(lin, m);
+    const r = P.render(shown, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
                                         sharpenRadius: m.sharpenRadius, wavelet: m.wavelet });
     const used = stats.used;
     const field = stats.field.slice().sort((a, b) => a - b);
@@ -242,7 +279,8 @@ const handlers = {
   // Re-render what is already stacked: no re-decode, no re-align.
   async rerender(m) {
     if (!mpaMean) { post({ type: 'error', message: 'Nothing stacked yet.' }); return; }
-    const r = P.render(mpaMean, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
+    const shown = deconvolved(mpaMean, m);
+    const r = P.render(shown, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
                                             sharpenRadius: m.sharpenRadius, wavelet: m.wavelet });
     const buf = r.rgba.buffer;
     post({ type: 'result', rgba: buf, size: O.canvas, frames: (acc2 && acc2.frames) || acc1.frames,
@@ -284,6 +322,14 @@ function measureQuality(finalLin) {
 // Reported from inside the worker: performance.memory on the main thread cannot
 // see this heap, so measuring there would show a flat figure however large the
 // accumulators grow.
+// Deconvolution runs before the stretch, like the wavelet stage, and only when
+// a PSF has actually been measured — never with an assumed one.
+function deconvolved(lin, m) {
+  const iters = Math.round(m && m.deconv || 0);
+  if (!iters || !psf) return lin;
+  return P.richardsonLucy(lin, O.canvas, psf.psf, psf.k, iters);
+}
+
 function memory() {
   const px = O ? O.canvas * O.canvas : 0;
   const bytes = (acc1 ? px * 8 * 3 : 0) + (acc2 ? px * 8 * 3 : 0) + (mapx ? px * 4 * 2 : 0);

@@ -327,6 +327,7 @@ const renderOpts = () => ({
   sharpen: Number($('sharpen').value),
   sharpenRadius: Number($('radius').value),
   wavelet: ['wav0', 'wav1', 'wav2', 'wav3'].map((id) => Number($(id).value)),
+  deconv: Number($('deconv').value),
 });
 
 async function run() {
@@ -410,6 +411,7 @@ function finish(res, ref, p1, p2) {
   setWipe(wipe.value);
   compare.hidden = false;
   exports.hidden = false;
+  $('psfbox').hidden = false;
   bar.classList.remove('on');
   setStage(4);
   busy = false; go.disabled = false;
@@ -541,6 +543,96 @@ function curveTable(cv) {
     as blurrier frames are added and it would always favour using everything.</div>`;
 }
 
+// --- point spread function -------------------------------------------------
+
+let psfInfo = null;
+
+$('psfGo').addEventListener('click', async () => {
+  if (busy || !worker) { say('Stack something first.', true); return; }
+  $('psfGo').disabled = true;
+  say('Measuring the PSF from the limb…');
+  try {
+    const r = await call({ type: 'measurePSF' }, 'psf');
+    if (r.error) { say('PSF: ' + r.error, true); return; }
+    psfInfo = r;
+    drawPSF(r);
+    say(`PSF measured from the ${r.source} limb — FWHM ${r.fwhm.toFixed(2)} px`);
+  } catch (e) {
+    say('Could not measure the PSF: ' + e.message, true);
+  } finally {
+    $('psfGo').disabled = false;
+  }
+});
+
+// The kernel itself, on a log scale. Linear display shows a single bright dot
+// and hides the wings, which are exactly what distinguishes seeing from defocus.
+function drawPSF(r) {
+  const k = r.k, psf = new Float32Array(r.psf);
+  const c = $('psfImg'), n = 128;
+  c.width = n; c.height = n;
+  const g = c.getContext('2d');
+  const id = g.createImageData(n, n);
+  let peak = 0;
+  for (let i = 0; i < psf.length; i++) if (psf[i] > peak) peak = psf[i];
+  const floor = peak * 1e-3;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const sx = Math.min(k - 1, (x * k / n) | 0), sy = Math.min(k - 1, (y * k / n) | 0);
+      const v = Math.max(floor, psf[sy * k + sx]);
+      const t = Math.max(0, Math.min(1, Math.log(v / floor) / Math.log(peak / floor)));
+      const q = (y * n + x) * 4;
+      // warm ramp: black -> deep orange -> white
+      id.data[q] = Math.min(255, 255 * Math.pow(t, 0.6));
+      id.data[q + 1] = Math.min(255, 255 * Math.pow(t, 1.4));
+      id.data[q + 2] = Math.min(255, 255 * Math.pow(t, 3.0));
+      id.data[q + 3] = 255;
+    }
+  }
+  g.putImageData(id, 0, 0);
+  $('psfCap').textContent = `${k}×${k} px, log scale`;
+
+  // radial profile, log vertical
+  const p = $('psfProf'), pw = 260, ph = 128;
+  p.width = pw; p.height = ph;
+  const pg = p.getContext('2d');
+  pg.fillStyle = '#000'; pg.fillRect(0, 0, pw, ph);
+  const half = (k - 1) / 2;
+  const bins = new Float64Array(Math.ceil(half) + 1), cnt = new Float64Array(bins.length);
+  for (let y = 0; y < k; y++) for (let x = 0; x < k; x++) {
+    const rr = Math.round(Math.hypot(x - half, y - half));
+    if (rr < bins.length) { bins[rr] += psf[y * k + x]; cnt[rr]++; }
+  }
+  for (let i = 0; i < bins.length; i++) if (cnt[i]) bins[i] /= cnt[i];
+  const bmax = Math.max(...bins), bfloor = bmax * 1e-4;
+  pg.strokeStyle = '#ffb454'; pg.lineWidth = 1.5; pg.beginPath();
+  bins.forEach((v, i) => {
+    const x = (i / (bins.length - 1)) * (pw - 8) + 4;
+    const t = Math.log(Math.max(bfloor, v) / bfloor) / Math.log(bmax / bfloor);
+    const y = ph - 6 - t * (ph - 16);
+    i ? pg.lineTo(x, y) : pg.moveTo(x, y);
+  });
+  pg.stroke();
+  pg.fillStyle = '#a89880'; pg.font = '10px system-ui';
+  pg.fillText('0', 4, ph - 2); pg.fillText(`${Math.round(half)} px`, pw - 34, ph - 2);
+
+  const rows = [
+    ['Measured from', `the ${r.source} limb`],
+    ['Edge profiles averaged', String(r.profiles)],
+    ['FWHM', `${r.fwhm.toFixed(2)} px`],
+    ['Sigma', `${r.sigma.toFixed(2)} px`],
+    ['Shape (kurtosis)', `${r.kurtosis.toFixed(2)} — ` +
+      (r.kurtosis < 2.6 ? 'flat-topped, defocus-like'
+        : r.kurtosis > 3.6 ? 'heavy-tailed, seeing-like' : 'close to gaussian')],
+    ['Re-projection error', `${(100 * r.residual).toFixed(1)}%`],
+  ];
+  $('psfTable').innerHTML = rows.map(([a, b]) =>
+    `<tr><td>${a}</td><td class="v">${b}</td></tr>`).join('');
+  $('psfbox').hidden = false;
+  $('deconvNote').textContent = r.kurtosis < 2.6
+    ? 'Flat-topped: defocus. Deconvolution should help a lot here.'
+    : 'Heavy-tailed: seeing-limited. Deconvolution helps, but less than for defocus.';
+}
+
 // --- before/after wipe ----------------------------------------------------
 
 function setWipe(pct) {
@@ -606,7 +698,7 @@ $('dlJpg').addEventListener('click', () => save('jpg', 'image/jpeg', 0.95));
 
 // Sharpening only changes the render, so it reuses the stack already in memory.
 let t = null;
-for (const id of ['sharpen', 'radius', 'wav0', 'wav1', 'wav2', 'wav3']) {
+for (const id of ['sharpen', 'radius', 'wav0', 'wav1', 'wav2', 'wav3', 'deconv']) {
   $(id).addEventListener('input', () => {
     if (busy || exports.hidden || !worker) return;
     clearTimeout(t);
@@ -635,6 +727,7 @@ if (!window.Worker || !window.OffscreenCanvas || !HTMLVideoElement.prototype.req
 // frame extraction is driven directly through these during testing.
 window.__sf.ui = {
   onPreview, drawOverlay, drawTimeline, setStage, showStats, finish, setWipe,
+  drawPSF,
   setAPs: (pos, canvas, grid) => { apPositions = pos; apCanvas = canvas; indexAPs(grid); drawOverlay(); },
   setTrack: (t) => { track = t; drawTimeline(); },
 };
