@@ -202,11 +202,18 @@
                fraction: idx.length / n };
     }
 
+    // The source Mat is 8.3 MB at 4K and was allocated and freed once per frame
+    // per pass. It is reused instead. Callers must NOT delete it.
+    let srcCache = null;
     const grayMat = (gray, w, h) => {
-      const m = new cv.Mat(h, w, cv.CV_8U);
-      m.data.set(gray);
-      return m;
+      if (!srcCache || srcCache.rows !== h || srcCache.cols !== w) {
+        if (srcCache) srcCache.delete();
+        srcCache = new cv.Mat(h, w, cv.CV_8U);
+      }
+      srcCache.data.set(gray);
+      return srcCache;
     };
+    const releaseScratch = () => { if (srcCache) { srcCache.delete(); srcCache = null; } };
 
     // Translation putting the disc centre at the canvas centre.
     const centreShift = (cx, cy, canvas) =>
@@ -298,17 +305,42 @@
       M.delete();
       const C = [ia, ib, ia * m02 + ib * m12 + itx,
                  id, ie, id * m02 + ie * m12 + ity];
-      src.delete();
       return { C, centroid: c, ecc: ok, eccError, shift: Math.hypot(tx, ty) };
     }
 
+    // Which canvas pixels this frame actually supplied data for.
+    //
+    // warpAffine fills everything outside the source with zeros, and summing
+    // those as though they were measurements darkens whatever the frame did not
+    // cover. On a clip that drifts — 580 px over 27 s was measured — the edges
+    // are progressively biased toward black by frames that never saw them.
+    //
+    // Computed by inverting the affine and testing bounds, which is exact for an
+    // affine map and cheaper than warping a second mask. The increment along a
+    // row is constant, so it is two adds per pixel.
+    function coverageOf(C, w, h, canvas) {
+      const det = C[0] * C[4] - C[1] * C[3];
+      if (!det) return null;
+      const ia = C[4] / det, ib = -C[1] / det, id = -C[3] / det, ie = C[0] / det;
+      const itx = -(ia * C[2] + ib * C[5]), ity = -(id * C[2] + ie * C[5]);
+      const cov = new Uint8Array(canvas * canvas);
+      const xmax = w - 1.001, ymax = h - 1.001;
+      for (let y = 0, i = 0; y < canvas; y++) {
+        let sx = ib * y + itx, sy = ie * y + ity;
+        for (let x = 0; x < canvas; x++, i++, sx += ia, sy += id) {
+          cov[i] = (sx >= 0 && sy >= 0 && sx <= xmax && sy <= ymax) ? 1 : 0;
+        }
+      }
+      return cov;
+    }
+
     function warpToCanvas(gray, w, h, C, canvas) {
-      const src = grayMat(gray, w, h);
+      const src = grayMat(gray, w, h);        // shared scratch, not ours to free
       const M = cv.matFromArray(2, 3, cv.CV_64F, C);
       const dst = new cv.Mat();
       cv.warpAffine(src, dst, M, new cv.Size(canvas, canvas), cv.INTER_LINEAR,
                     cv.BORDER_CONSTANT, new cv.Scalar(0));
-      src.delete(); M.delete();
+      M.delete();
       return dst;
     }
 
@@ -471,7 +503,7 @@
     // plain resize lands them in the right places provided canvas/step is an
     // integer — which is why `step` must divide `canvas`.
     function densify(grid, NG, canvas, ramp, out) {
-      const small = cv.matFromArray(NG, NG, cv.CV_32F, Array.from(grid));
+      const small = mat32F(NG, NG, grid);
       const blur = new cv.Mat();
       cv.GaussianBlur(small, blur, new cv.Size(0, 0), 0.9);
       const big = new cv.Mat();
@@ -498,26 +530,40 @@
 
     function newAccumulator(canvas, halves) {
       const n = canvas * canvas;
-      const a = { canvas, sum: new Float64Array(n), frames: 0 };
-      if (halves) { a.odd = new Float64Array(n); a.even = new Float64Array(n); a.nOdd = 0; a.nEven = 0; }
+      // Per-pixel counts, not a single frame count: pixels differ in how many
+      // frames actually covered them once the framing drifts.
+      const a = { canvas, sum: new Float32Array(n), cnt: new Uint16Array(n), frames: 0 };
+      if (halves) {
+        a.odd = new Float32Array(n); a.even = new Float32Array(n);
+        a.cntOdd = new Uint16Array(n); a.cntEven = new Uint16Array(n);
+        a.nOdd = 0; a.nEven = 0;
+      }
       return a;
     }
 
-    function accumulate(acc, data, index) {
-      const s = acc.sum;
-      for (let i = 0; i < s.length; i++) s[i] += data[i];
+    function accumulate(acc, data, cover, index) {
+      const s = acc.sum, c = acc.cnt;
+      if (cover) {
+        for (let i = 0; i < s.length; i++) if (cover[i]) { s[i] += data[i]; c[i]++; }
+      } else {
+        for (let i = 0; i < s.length; i++) { s[i] += data[i]; c[i]++; }
+      }
       acc.frames++;
       if (acc.odd) {
-        const h = index % 2 ? acc.odd : acc.even;
-        for (let i = 0; i < h.length; i++) h[i] += data[i];
-        if (index % 2) acc.nOdd++; else acc.nEven++;
+        const odd = index % 2;
+        const h = odd ? acc.odd : acc.even, hc = odd ? acc.cntOdd : acc.cntEven;
+        if (cover) {
+          for (let i = 0; i < h.length; i++) if (cover[i]) { h[i] += data[i]; hc[i]++; }
+        } else {
+          for (let i = 0; i < h.length; i++) { h[i] += data[i]; hc[i]++; }
+        }
+        if (odd) acc.nOdd++; else acc.nEven++;
       }
     }
 
     const finishAcc = (acc) => {
       const out = new Float32Array(acc.sum.length);
-      const k = 1 / Math.max(1, acc.frames);
-      for (let i = 0; i < out.length; i++) out[i] = acc.sum[i] * k;
+      for (let i = 0; i < out.length; i++) out[i] = acc.cnt[i] ? acc.sum[i] / acc.cnt[i] : 0;
       return out;
     };
 
@@ -544,7 +590,7 @@
       for (let i = 0; i < n; i++) src[i] = Math.max(0, Math.min(255, (lin[i] - lo) * scale));
 
       if (opt.sharpen > 0) {
-        const m = cv.matFromArray(canvas, canvas, cv.CV_32F, Array.from(src));
+        const m = mat32F(canvas, canvas, src);
         const b = new cv.Mat();
         cv.GaussianBlur(m, b, new cv.Size(0, 0), opt.sharpenRadius);
         const out = new cv.Mat();
@@ -582,7 +628,7 @@
     }
 
     const bandOf = (arr, canvas, s1, s2) => {
-      const m = cv.matFromArray(canvas, canvas, cv.CV_32F, Array.from(arr));
+      const m = mat32F(canvas, canvas, arr);
       const a = new cv.Mat(), b = new cv.Mat();
       cv.GaussianBlur(m, a, new cv.Size(0, 0), s1);
       cv.GaussianBlur(m, b, new cv.Size(0, 0), s2);
@@ -608,9 +654,9 @@
 
     const halfMean = (acc, which) => {
       const src = which === 'odd' ? acc.odd : acc.even;
-      const k = 1 / Math.max(1, which === 'odd' ? acc.nOdd : acc.nEven);
+      const cnt = which === 'odd' ? acc.cntOdd : acc.cntEven;
       const out = new Float32Array(src.length);
-      for (let i = 0; i < out.length; i++) out[i] = src[i] * k;
+      for (let i = 0; i < out.length; i++) out[i] = cnt[i] ? src[i] / cnt[i] : 0;
       return out;
     };
 
@@ -768,6 +814,15 @@
       };
     }
 
+    // cv.matFromArray(..., Array.from(f32)) boxes every element into a regular
+    // JS array before copying it in. On a 2100x2100 map that measured 223 ms per
+    // frame — 46% of the whole second pass. Writing into data32F is a memcpy.
+    function mat32F(rows, cols, arr) {
+      const m = new cv.Mat(rows, cols, cv.CV_32F);
+      m.data32F.set(arr);
+      return m;
+    }
+
     // Cheap downsample for the live preview: integer stride and a min/max
     // stretch, so it costs a fraction of a full render and can run mid-stack.
     function preview(lin, canvas, size) {
@@ -798,8 +853,8 @@
       solveGlobal, warpToCanvas, buildAPs, discMaskMat, measureField,
       fillNaN, densify, ramps, subpixel,
       newAccumulator, accumulate, finishAcc, render,
-      innerMask, reliability, stackNoise, frameNoise, preview, halfMean,
-      discGeometry, fitLimb, fitCircleLS, circumcircle, coarseCentre,
+      innerMask, reliability, stackNoise, frameNoise, preview, halfMean, mat32F, releaseScratch,
+      discGeometry, fitLimb, fitCircleLS, circumcircle, coarseCentre, coverageOf,
       FRACTIONS, frameQuality, newCurve, accumulateCurve, curveResult,
     };
   }

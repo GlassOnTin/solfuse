@@ -94,7 +94,7 @@ function frameReader(file, w, h) {
     shifts.push(g.shift);
     transforms.push(g.C);
     const m = P.warpToCanvas(gray, w, h, g.C, o.canvas);
-    P.accumulate(acc1, m.data, i);
+    P.accumulate(acc1, m.data, P.coverageOf(g.C, w, h, o.canvas), i);
     m.delete();
     if ((i + 1) % 100 === 0) process.stdout.write(`\r  pass 1: ${i + 1} frames`);
   }
@@ -118,6 +118,8 @@ function frameReader(file, w, h) {
   const { X, Y } = P.ramps(o.canvas);
   const mapx = new Float32Array(o.canvas * o.canvas);
   const mapy = new Float32Array(o.canvas * o.canvas);
+  const mapMatX = new cv.Mat(o.canvas, o.canvas, cv.CV_32F);
+  const mapMatY = new cv.Mat(o.canvas, o.canvas, cv.CV_32F);
   let usedTotal = 0, fieldMag = [];
   const r2 = frameReader(SRC, w, h);
   for (let i = 0; i < N; i++) {
@@ -132,12 +134,11 @@ function frameReader(file, w, h) {
     fieldMag.push(mag / gx.length);
     P.densify(gx, NG, o.canvas, X, mapx);
     P.densify(gy, NG, o.canvas, Y, mapy);
-    const mx = cv.matFromArray(o.canvas, o.canvas, cv.CV_32F, Array.from(mapx));
-    const my = cv.matFromArray(o.canvas, o.canvas, cv.CV_32F, Array.from(mapy));
+    mapMatX.data32F.set(mapx); mapMatY.data32F.set(mapy);
     const out = new cv.Mat();
-    cv.remap(warped, out, mx, my, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
-    P.accumulate(acc2, out.data, i);
-    warped.delete(); mx.delete(); my.delete(); out.delete();
+    cv.remap(warped, out, mapMatX, mapMatY, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
+    P.accumulate(acc2, out.data, P.coverageOf(transforms[i], w, h, o.canvas), i);
+    warped.delete(); out.delete();
     if ((i + 1) % 100 === 0) process.stdout.write(`\r  pass 2: ${i + 1} frames`);
   }
   r2.close();

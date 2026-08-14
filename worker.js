@@ -29,7 +29,7 @@ let W = 0, H = 0;
 let acc1 = null, acc2 = null;
 let refQuarter = null, ref8 = null, aps = null, NG = 0;
 let transforms = [];
-let ramp = null, mapx = null, mapy = null;
+let ramp = null, mapx = null, mapy = null, mapMatX = null, mapMatY = null;
 let globMean = null, mpaMean = null;
 let firstFrame = null;      // first aligned frame, kept for the before/after and the noise estimate
 let stats = { ecc: 0, shifts: [], used: [], field: [] };
@@ -60,6 +60,8 @@ function freeAll() {
   if (ref8) { ref8.delete(); ref8 = null; }
   if (aps) { for (const a of aps) { if (a.tmpl) a.tmpl.delete(); } aps = null; }
   acc1 = acc2 = null; transforms = []; globMean = mpaMean = null;
+  if (mapMatX) { mapMatX.delete(); mapMatX = null; }
+  if (mapMatY) { mapMatY.delete(); mapMatY = null; }
   ramp = mapx = mapy = null; firstFrame = null;
   quality = []; rankOf = null; curve = null;
   stats = { ecc: 0, shifts: [], used: [], field: [] };
@@ -121,7 +123,8 @@ const handlers = {
       const warped = P.warpToCanvas(gray, W, H, g.C, O.canvas);
       if (!firstFrame) firstFrame = Float32Array.from(warped.data);
       if (O.curve) quality[m.index] = P.frameQuality(warped, O.canvas, 700);
-      P.accumulate(acc1, warped.data, m.seq);
+      const cover1 = P.coverageOf(g.C, W, H, O.canvas);
+      P.accumulate(acc1, warped.data, cover1, m.seq);
       warped.delete();
       if (duePreview(acc1.frames)) sendPreview(acc1, 1, null);
       post({ type: 'framed', index: m.index, phase: 1,
@@ -131,6 +134,7 @@ const handlers = {
       const C = transforms[m.index];
       if (!C) { post({ type: 'framed', index: m.index, skipped: true }); return; }
       const warped = P.warpToCanvas(gray, W, H, C, O.canvas);
+      const cover2 = P.coverageOf(C, W, H, O.canvas);
       let mag = null, used = null, grid = null;
       if (O.multipoint && aps && aps.length) {
         const f = P.measureField(warped, aps, NG, O);
@@ -144,15 +148,14 @@ const handlers = {
         grid = { gx: Float32Array.from(gx), gy: Float32Array.from(gy) };
         P.densify(gx, NG, O.canvas, ramp.X, mapx);
         P.densify(gy, NG, O.canvas, ramp.Y, mapy);
-        const mx = cv.matFromArray(O.canvas, O.canvas, cv.CV_32F, Array.from(mapx));
-        const my = cv.matFromArray(O.canvas, O.canvas, cv.CV_32F, Array.from(mapy));
+        mapMatX.data32F.set(mapx); mapMatY.data32F.set(mapy);
         const out = new cv.Mat();
-        cv.remap(warped, out, mx, my, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
-        P.accumulate(acc2, out.data, m.seq);
+        cv.remap(warped, out, mapMatX, mapMatY, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
+        P.accumulate(acc2, out.data, cover2, m.seq);
         if (curve && rankOf) P.accumulateCurve(curve, out, rankOf.get(m.index) ?? 1, m.seq);
-        mx.delete(); my.delete(); out.delete();
+        out.delete();
       } else {
-        P.accumulate(acc2, warped.data, m.seq);
+        P.accumulate(acc2, warped.data, cover2, m.seq);
         if (curve && rankOf) P.accumulateCurve(curve, warped, rankOf.get(m.index) ?? 1, m.seq);
       }
       warped.delete();
@@ -176,6 +179,10 @@ const handlers = {
       ramp = P.ramps(O.canvas);
       mapx = new Float32Array(O.canvas * O.canvas);
       mapy = new Float32Array(O.canvas * O.canvas);
+      // Allocated once and refilled per frame; building them each time was the
+      // single largest cost in the second pass.
+      mapMatX = new cv.Mat(O.canvas, O.canvas, cv.CV_32F);
+      mapMatY = new cv.Mat(O.canvas, O.canvas, cv.CV_32F);
       acc2 = P.newAccumulator(O.canvas, true);
     }
     // Rank the frames pass 1 graded, so pass 2 knows which keep-fractions each

@@ -246,6 +246,61 @@ On this footage the choice barely matters anyway: every method reached ECC
 correlation 0.99938 with zero failures. The coarse stage is not the bottleneck.
 The framing is.
 
+### Coverage-weighted accumulation
+
+`warpAffine` fills everything outside the source frame with zeros. Summing those
+as though they were measurements darkens whatever a frame did not cover, and on
+a clip that drifts — 580 px over 27 s on the eclipse footage — that is a large
+part of the canvas.
+
+Measured over 40 eclipse frames, with both normalisations taken from the same
+run:
+
+| region | share of canvas | mean error in the old accumulation |
+|---|---|---|
+| covered by every frame | 82.2% | **0.0000 DN** |
+| covered by only some frames | 17.8% | 0.39 DN, up to 11.4 DN |
+
+Against a stack noise floor of about 0.19 DN, an 11 DN error is not subtle. The
+fully-covered figure being exactly zero is the control: the fix changes nothing
+where nothing was wrong. Coverage is computed by inverting the affine and testing
+bounds rather than warping a second mask — exact for an affine map, two adds per
+pixel, and validated against a warped mask to within one boundary pixel.
+
+Note this is invisible to the split-half statistics, which are measured over the
+eroded inner disc and therefore only ever look at fully-covered pixels. A metric
+that cannot see a defect is not evidence the defect is absent.
+
+### Speed
+
+Pass 2, profiled per stage at 2100 px canvas with 182 alignment points:
+
+| stage | before | after |
+|---|---|---|
+| building the two map Mats | **222.9 ms** | 3.6 ms |
+| measuring the field (182 patches) | 74.8 | 73.2 |
+| affine warp | 69.6 | 69.7 |
+| remap | 67.6 | 68.3 |
+| accumulate | 22.3 | 19.3 |
+| densify | 15.6 | 15.9 |
+| coverage | 5.2 | 5.7 |
+| **total per frame** | **478 ms** | **256 ms** |
+
+Nearly half of the second pass was `cv.matFromArray(..., Array.from(f32))`,
+which boxes 4.4 million floats into a regular JavaScript array before copying
+them in. Writing into `data32F` is a memcpy, and the Mats are now allocated once
+and refilled. End to end on 30 frames: 24 s to 18 s, with pass 2 alone 1.8x
+faster and results unchanged (fine-band gain 1.250x against 1.249x before).
+
+Accumulators are `Float32Array` rather than `Float64Array`: 8-bit samples summed
+over at most 65535 frames peak near 16.7 million, inside Float32's exact-integer
+range, so this is lossless and halves the memory. Verified: 1140 frames of 255
+sums to exactly 290700.
+
+What remains is close to the floor for this canvas size. Warp, remap and field
+measurement are each about 27% and all scale with area, so the effective lever
+now is the output size — 1400 px instead of 2100 is 2.25x less work.
+
 ### The coarse stage is not the limiting factor
 
 Four coarse registration methods were tried against a partial eclipse — a
