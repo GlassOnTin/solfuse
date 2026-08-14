@@ -246,6 +246,35 @@ On this footage the choice barely matters anyway: every method reached ECC
 correlation 0.99938 with zero failures. The coarse stage is not the bottleneck.
 The framing is.
 
+### Wavelet sharpening
+
+The à trous scheme Registax made standard. The image is split into octave bands
+by repeated blurring — `detail_i = blur_{i-1} - blur_i`, with `blur_n` as the
+residual — and reconstructed as `residual + sum(gain_i * detail_i)`.
+
+With every gain at 1 the reconstruction is exact. That is the property worth
+testing, and it is: worst absolute difference **0.00e+0** against the input. The
+decomposition loses nothing, so the gains alone decide the result.
+
+The advantage over an unsharp mask is control. One unsharp radius amplifies a
+single scale and drags noise up with it; here the ~1 px band, where sensor and
+codec noise mostly live, can be held at or below 1.0 while the ~2 and ~4 px bands
+carrying real solar structure are lifted. Sharpening is applied to the linear
+stack before the stretch, not after, so it is not working on a tone curve that
+has already compressed the highlights.
+
+It re-renders from the finished stack — **181 ms** at 1400 px — so the sliders
+are interactive and cost no re-stacking.
+
+### Clipping the time range
+
+The run is linear in frames, so half the clip is half the wait. Start and end
+times are settable before stacking, which is both the fastest way to iterate on
+sharpening and stretch settings and the way to skip a passing cloud or the moment
+the mount was nudged. Both passes use the same range, and the extractor seeks
+before playing — starting playback and seeking together can deliver a frame from
+the old position before the seek lands.
+
 ### Coverage-weighted accumulation
 
 `warpAffine` fills everything outside the source frame with zeros. Summing those

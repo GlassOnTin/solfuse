@@ -567,13 +567,59 @@
       return out;
     };
 
+    // ---- wavelet sharpening ------------------------------------------------
+    //
+    // The a trous ("with holes") scheme Registax made standard for planetary and
+    // solar work. The image is split into scales by repeated blurring:
+    //
+    //     detail_i = blur_{i-1} - blur_i        (band-limited to that scale)
+    //     residual = blur_n                     (everything coarser)
+    //     result   = residual + sum(gain_i * detail_i)
+    //
+    // With every gain at 1 this reconstructs the input exactly, which is the
+    // property worth testing — it means the decomposition loses nothing and the
+    // gains alone decide the result.
+    //
+    // The advantage over an unsharp mask is control: a single unsharp radius
+    // amplifies one scale and drags noise up with it, while this lifts the
+    // scales carrying real solar structure and leaves the finest scale — where
+    // sensor and codec noise live — alone, or pulls it down.
+    function waveletSharpen(lin, canvas, gains) {
+      if (!gains || !gains.length || gains.every((g) => g === 1)) return lin;
+      let cur = mat32F(canvas, canvas, lin);
+      const detail = [];
+      let sigma = 1.0;
+      for (let i = 0; i < gains.length; i++) {
+        const blurred = new cv.Mat();
+        cv.GaussianBlur(cur, blurred, new cv.Size(0, 0), sigma);
+        const d = new cv.Mat();
+        cv.subtract(cur, blurred, d);
+        detail.push(d);
+        cur.delete();
+        cur = blurred;
+        sigma *= 2;                       // octave per scale
+      }
+      // cur is now the residual; add the scaled detail back on to it.
+      for (let i = 0; i < detail.length; i++) {
+        if (gains[i] !== 0) cv.addWeighted(cur, 1, detail[i], gains[i], 0, cur);
+        detail[i].delete();
+      }
+      const out = Float32Array.from(cur.data32F);
+      cur.delete();
+      return out;
+    }
+
     // ---- display -----------------------------------------------------------
 
     // A percentile stretch, not the astro midtone transfer: the solar disc is a
     // near-uniform bright field and an autostretch built for a dark sky would
     // drive it to white.
     function render(lin, canvas, o) {
-      const opt = Object.assign({ lo: 0.2, hi: 99.9, sharpen: 0, sharpenRadius: 2.4 }, o || {});
+      const opt = Object.assign({ lo: 0.2, hi: 99.9, sharpen: 0, sharpenRadius: 2.4,
+                                  wavelet: null }, o || {});
+      // Sharpen the linear stack, then stretch. Sharpening after the stretch
+      // would work on a tone curve that has already compressed the highlights.
+      if (opt.wavelet) lin = waveletSharpen(lin, canvas, opt.wavelet);
       const n = lin.length;
       const samp = new Float32Array(Math.ceil(n / 16));
       let j = 0;
@@ -854,6 +900,7 @@
       fillNaN, densify, ramps, subpixel,
       newAccumulator, accumulate, finishAcc, render,
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean, mat32F, releaseScratch,
+      waveletSharpen,
       discGeometry, fitLimb, fitCircleLS, circumcircle, coarseCentre, coverageOf,
       FRACTIONS, frameQuality, newCurve, accumulateCurve, curveResult,
     };

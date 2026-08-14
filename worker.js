@@ -220,7 +220,7 @@ const handlers = {
     const lin = O.multipoint && acc2 && acc2.frames ? P.finishAcc(acc2) : globMean;
     mpaMean = lin;
     const r = P.render(lin, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
-                                        sharpenRadius: m.sharpenRadius });
+                                        sharpenRadius: m.sharpenRadius, wavelet: m.wavelet });
     const used = stats.used;
     const field = stats.field.slice().sort((a, b) => a - b);
     const buf = r.rgba.buffer;
@@ -243,7 +243,7 @@ const handlers = {
   async rerender(m) {
     if (!mpaMean) { post({ type: 'error', message: 'Nothing stacked yet.' }); return; }
     const r = P.render(mpaMean, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
-                                            sharpenRadius: m.sharpenRadius });
+                                            sharpenRadius: m.sharpenRadius, wavelet: m.wavelet });
     const buf = r.rgba.buffer;
     post({ type: 'result', rgba: buf, size: O.canvas, frames: (acc2 && acc2.frames) || acc1.frames,
            aps: aps ? aps.length : 0, mem: memory() }, [buf]);

@@ -150,6 +150,12 @@ footer a { color: var(--dim); }
     <input id="file" type="file" accept="video/*" hidden>
   </div>
   <p id="meta" hidden></p>
+  <div class="row" id="cliprow" hidden>
+    <label>Use from <input id="clipStart" type="number" min="0" step="0.5" value="0" style="width:5.5em"> s</label>
+    <label>to <input id="clipEnd" type="number" min="0" step="0.5" value="0" style="width:5.5em"> s</label>
+    <span id="clipInfo" class="hint" style="margin:0"></span>
+    <button id="clipAll" class="ghost" style="padding:6px 12px">Whole clip</button>
+  </div>
 
   <div class="row">
     <button id="go" disabled>Stack</button>
@@ -222,9 +228,16 @@ footer a { color: var(--dim); }
 
   <details id="adv">
     <summary>Advanced</summary>
-    <div class="ctl"><span>Sharpening</span><input type="range" id="sharpen" min="0" max="2.5" step="0.05" value="0"><output>0.00</output></div>
-    <p class="hint">Unsharp mask over the stacked result. Stacking removes the noise that would otherwise be amplified, which is what makes sharpening worth doing at all.</p>
-    <div class="ctl"><span>Sharpen radius</span><input type="range" id="radius" min="0.8" max="6" step="0.1" value="2.4"><output>2.40</output></div>
+    <div class="ctl"><span>Detail ~1 px</span><input type="range" id="wav0" min="0" max="4" step="0.05" value="1"><output>1.00</output></div>
+    <div class="ctl"><span>Detail ~2 px</span><input type="range" id="wav1" min="0" max="4" step="0.05" value="1"><output>1.00</output></div>
+    <div class="ctl"><span>Detail ~4 px</span><input type="range" id="wav2" min="0" max="4" step="0.05" value="1"><output>1.00</output></div>
+    <div class="ctl"><span>Detail ~8 px</span><input type="range" id="wav3" min="0" max="4" step="0.05" value="1"><output>1.00</output></div>
+    <p class="hint">Wavelet sharpening, the à trous scheme. Each slider scales one band of detail;
+      at 1.00 the image is reconstructed exactly. Sensor and codec noise live mostly in the ~1 px
+      band, so lifting ~2 and ~4 px while holding ~1 px at or below 1.00 sharpens structure without
+      amplifying grain. Re-renders from the finished stack, so it is instant.</p>
+    <div class="ctl"><span>Unsharp (legacy)</span><input type="range" id="sharpen" min="0" max="2.5" step="0.05" value="0"><output>0.00</output></div>
+    <div class="ctl"><span>Unsharp radius</span><input type="range" id="radius" min="0.8" max="6" step="0.1" value="2.4"><output>2.40</output></div>
     <div class="ctl"><span>Point spacing</span><input type="range" id="step" min="60" max="210" step="10" value="100"><output>100</output></div>
     <p class="hint">Grid pitch for multi-point alignment, in output pixels. Closer follows the distortion more finely and takes longer. Must divide the output size.</p>
     <div class="ctl"><span>Search radius</span><input type="range" id="search" min="6" max="24" step="1" value="12"><output>12</output></div>
@@ -251,6 +264,6 @@ document.getElementById('copyDiag').addEventListener('click', function () {
 </script>
 <!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
      worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
-<script src="app.js?v=11" type="module"></script>
+<script src="app.js?v=12" type="module"></script>
 </body>
 </html>

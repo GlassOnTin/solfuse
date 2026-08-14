@@ -76,9 +76,40 @@ async function pick(f) {
   meta.textContent = `${f.name} · ${video.videoWidth}×${video.videoHeight} · ` +
                      `${video.duration.toFixed(1)}s`;
   meta.hidden = false;
+  $('clipStart').value = 0;
+  $('clipEnd').value = video.duration.toFixed(1);
+  $('clipStart').max = $('clipEnd').max = video.duration.toFixed(1);
+  $('cliprow').hidden = false;
+  showClip();
   go.disabled = false;
   say('Ready. Stacking reads the video twice — once to align, once to refine.');
 }
+
+// A shorter range is the cheapest way to iterate: the run is linear in frames,
+// so half the clip is half the wait. It is also how you skip a passing cloud or
+// the moment the mount was nudged.
+function clipRange() {
+  const dur = video.duration || 0;
+  let a = Math.max(0, Math.min(dur, Number($('clipStart').value) || 0));
+  let b = Math.max(0, Math.min(dur, Number($('clipEnd').value) || dur));
+  if (b <= a) b = dur;
+  return { start: a, end: b };
+}
+
+function showClip() {
+  const { start, end } = clipRange();
+  const dur = video.duration || 0;
+  const span = end - start;
+  // Frame rate is not exposed, so this is an estimate until frames are counted.
+  $('clipInfo').textContent = `${span.toFixed(1)}s of ${dur.toFixed(1)}s` +
+    (span < dur ? ` — about ${(100 * span / dur).toFixed(0)}% of the work` : '');
+}
+for (const id of ['clipStart', 'clipEnd']) $(id).addEventListener('input', showClip);
+$('clipAll').addEventListener('click', () => {
+  $('clipStart').value = 0;
+  $('clipEnd').value = (video.duration || 0).toFixed(1);
+  showClip();
+});
 
 // --- frame extraction -----------------------------------------------------
 //
@@ -88,12 +119,14 @@ async function pick(f) {
 // different set of frames on the second pass, matching by time still lines the
 // two passes up, whereas matching by count would silently pair the wrong frames.
 
-function extractFrames(onFrame, onProgress, rate) {
+function extractFrames(onFrame, onProgress, rate, range) {
   return new Promise((resolve, reject) => {
     if (!video.requestVideoFrameCallback) {
       reject(new Error('This browser lacks requestVideoFrameCallback — try current Chrome or Safari.'));
       return;
     }
+    const from = range ? range.start : 0;
+    const to = range ? range.end : Infinity;
     const w = video.videoWidth, h = video.videoHeight;
     const c = new OffscreenCanvas(w, h);
     const g = c.getContext('2d', { willReadFrequently: true });
@@ -116,7 +149,8 @@ function extractFrames(onFrame, onProgress, rate) {
       lastPresented = md.presentedFrames;
 
       const t = md.mediaTime;
-      if (t > lastTime) {                       // guard against a repeated frame
+      if (t > to) { done(); return; }           // past the end of the chosen range
+      if (t > lastTime && t >= from - 1e-6) {   // guard against a repeated frame
         lastTime = t;
         g.drawImage(video, 0, 0, w, h);
         const id = g.getImageData(0, 0, w, h);
@@ -129,11 +163,16 @@ function extractFrames(onFrame, onProgress, rate) {
 
     video.onended = () => { stop = false; done(); };
     video.onerror = () => reject(new Error('Video decoding failed part-way through.'));
-    video.currentTime = 0;
     video.playbackRate = rate || 1;
     video.muted = true;
-    video.requestVideoFrameCallback(tick);
-    video.play().catch((e) => reject(new Error('Could not play the video: ' + e.message)));
+    // Seek first, then play: starting playback and seeking together can deliver
+    // a frame from the old position before the seek lands.
+    const start = () => {
+      video.requestVideoFrameCallback(tick);
+      video.play().catch((e) => reject(new Error('Could not play the video: ' + e.message)));
+    };
+    if (Math.abs(video.currentTime - from) < 0.01) start();
+    else { video.onseeked = () => { video.onseeked = null; start(); }; video.currentTime = from; }
   });
 }
 
@@ -287,6 +326,7 @@ const renderOpts = () => ({
   lo: 0.2, hi: 99.9,
   sharpen: Number($('sharpen').value),
   sharpenRadius: Number($('radius').value),
+  wavelet: ['wav0', 'wav1', 'wav2', 'wav3'].map((id) => Number($(id).value)),
 });
 
 async function run() {
@@ -305,7 +345,8 @@ async function run() {
   }
   const w = video.videoWidth, h = video.videoHeight;
   const opts = options();
-  const dur = video.duration || 1;
+  const range = clipRange();
+  const span = Math.max(0.001, range.end - range.start);
 
   try {
     spawn();
@@ -320,8 +361,8 @@ async function run() {
 
     setProgress(4, 'Pass 1 of 2 — aligning on the disc…');
     const p1 = await extractFrames(send(1), (t, n) => {
-      setProgress(4 + (44 * t) / dur, `Pass 1 of 2 — ${n} frames aligned…`);
-    }, 1);
+      setProgress(4 + (44 * (t - range.start)) / span, `Pass 1 of 2 — ${n} frames aligned…`);
+    }, 1, range);
 
     const ref = await call({ type: 'buildRef' }, 'refReady');
     if (!ref.frames) throw new Error('No frames could be read from the video.');
@@ -336,8 +377,8 @@ async function run() {
       track = [];
       setProgress(50, `Pass 2 of 2 — ${ref.aps} alignment points…`);
       p2 = await extractFrames(send(2), (t, n) => {
-        setProgress(50 + (46 * t) / dur, `Pass 2 of 2 — refining frame ${n}…`);
-      }, 1);
+        setProgress(50 + (46 * (t - range.start)) / span, `Pass 2 of 2 — refining frame ${n}…`);
+      }, 1, range);
     }
 
     setStage(3);
@@ -565,7 +606,7 @@ $('dlJpg').addEventListener('click', () => save('jpg', 'image/jpeg', 0.95));
 
 // Sharpening only changes the render, so it reuses the stack already in memory.
 let t = null;
-for (const id of ['sharpen', 'radius']) {
+for (const id of ['sharpen', 'radius', 'wav0', 'wav1', 'wav2', 'wav3']) {
   $(id).addEventListener('input', () => {
     if (busy || exports.hidden || !worker) return;
     clearTimeout(t);
