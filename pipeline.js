@@ -570,6 +570,23 @@
       big.delete();
     }
 
+    // Weights interpolate the same way the displacement field does, but cubic
+    // resampling overshoots, so clamp after. Cells with no quality measurement
+    // (empty sky) weight 1: neutral, not zero, or the stack would lose them.
+    function densifyWeights(grid, NG, canvas, out, floorW) {
+      const g = new Float32Array(grid.length);
+      for (let i = 0; i < g.length; i++) g[i] = grid[i] > 0 ? grid[i] : 1;
+      const small = mat32F(NG, NG, g);
+      const blur = new cv.Mat();
+      cv.GaussianBlur(small, blur, new cv.Size(0, 0), 0.9);
+      const big = new cv.Mat();
+      cv.resize(blur, big, new cv.Size(canvas, canvas), 0, 0, cv.INTER_CUBIC);
+      small.delete(); blur.delete();
+      const d = big.data32F, fl = floorW == null ? 0.05 : floorW;
+      for (let i = 0; i < out.length; i++) out[i] = Math.max(fl, Math.min(1, d[i]));
+      big.delete();
+    }
+
     function ramps(canvas) {
       const X = new Float32Array(canvas * canvas), Y = new Float32Array(canvas * canvas);
       for (let y = 0, i = 0; y < canvas; y++) {
@@ -578,28 +595,92 @@
       return { X, Y };
     }
 
+    // Per-cell sharpness on the alignment grid: the mid-band energy over the
+    // high-band energy, the same noise-normalised ratio used for whole-frame
+    // ranking. Raw high-frequency energy would grade grain, which is how the
+    // first whole-frame metric came to select the noisiest frames.
+    //
+    // Measured per cell rather than per frame because seeing is local. A frame
+    // can be sharp on one side of the disc and soft on the other, and throwing
+    // the whole frame away discards the good half with the bad.
+    function cellQuality(warped, canvas, NG, o) {
+      const step = canvas / NG;
+      const q = new Float32Array(NG * NG).fill(NaN);
+      const f = new cv.Mat(), a = new cv.Mat(), b = new cv.Mat(), c = new cv.Mat(), d = new cv.Mat();
+      const pad = Math.round(step * 0.5);
+      for (let j = 0; j < NG; j++) {
+        for (let i = 0; i < NG; i++) {
+          const x0 = Math.round(i * step), y0 = Math.round(j * step);
+          const w = Math.min(Math.round(step) + pad, canvas - x0);
+          const h = Math.min(Math.round(step) + pad, canvas - y0);
+          if (w < 16 || h < 16) continue;
+          const roi = warped.roi(new cv.Rect(x0, y0, w, h));
+          roi.convertTo(f, cv.CV_32F);
+          roi.delete();
+          const mm = cv.minMaxLoc(f);
+          if (mm.maxVal < 12) continue;                 // nothing here worth grading
+          cv.GaussianBlur(f, a, new cv.Size(0, 0), 1.4);
+          cv.GaussianBlur(f, b, new cv.Size(0, 0), 3.2);
+          cv.subtract(a, b, a);
+          cv.GaussianBlur(f, c, new cv.Size(0, 0), 0.6);
+          cv.GaussianBlur(f, d, new cv.Size(0, 0), 1.2);
+          cv.subtract(c, d, c);
+          let mid = 0, hi = 0;
+          const A = a.data32F, C = c.data32F;
+          for (let k = 0; k < A.length; k++) { mid += A[k] * A[k]; hi += C[k] * C[k]; }
+          q[j * NG + i] = mid / (hi + 1e-9);
+        }
+      }
+      for (const m of [f, a, b, c, d]) m.delete();
+      return q;
+    }
+
+    // Turn per-cell qualities into per-cell weights, against a reference level
+    // for each cell taken across all frames. Weighting is relative to the same
+    // place in other frames, never to other places in the same frame — the disc
+    // centre is intrinsically busier than the limb and would otherwise dominate.
+    function cellWeights(q, ref, NG, power, floorW) {
+      const w = new Float32Array(NG * NG);
+      const p = power == null ? 2 : power, fl = floorW == null ? 0.05 : floorW;
+      for (let i = 0; i < w.length; i++) {
+        const qi = q[i], ri = ref[i];
+        if (!(qi > 0) || !(ri > 0)) { w[i] = NaN; continue; }
+        w[i] = Math.max(fl, Math.min(1, Math.pow(qi / ri, p)));
+      }
+      return w;
+    }
+
     // ---- accumulation ------------------------------------------------------
     //
     // JavaScript typed arrays, not cv.Mat, for the same reason as AstroFuse: the
     // binding limit on this build is the wasm32 heap, and keeping the
     // accumulators off it makes frame count cost nothing.
 
-    function newAccumulator(canvas, halves) {
+    function newAccumulator(canvas, halves, weighted) {
       const n = canvas * canvas;
       // Per-pixel counts, not a single frame count: pixels differ in how many
-      // frames actually covered them once the framing drifts.
-      const a = { canvas, sum: new Float32Array(n), cnt: new Uint16Array(n), frames: 0 };
+      // frames actually covered them once the framing drifts. With seeing
+      // weighting the count becomes a sum of weights, so it has to be float.
+      const C = weighted ? Float32Array : Uint16Array;
+      const a = { canvas, sum: new Float32Array(n), cnt: new C(n), frames: 0, weighted: !!weighted };
       if (halves) {
         a.odd = new Float32Array(n); a.even = new Float32Array(n);
-        a.cntOdd = new Uint16Array(n); a.cntEven = new Uint16Array(n);
+        a.cntOdd = new C(n); a.cntEven = new C(n);
         a.nOdd = 0; a.nEven = 0;
       }
       return a;
     }
 
-    function accumulate(acc, data, cover, index) {
+    function accumulate(acc, data, cover, index, weight) {
       const s = acc.sum, c = acc.cnt;
-      if (cover) {
+      if (weight) {
+        for (let i = 0; i < s.length; i++) {
+          if (cover && !cover[i]) continue;
+          const w = weight[i];
+          if (!(w > 0)) continue;
+          s[i] += data[i] * w; c[i] += w;
+        }
+      } else if (cover) {
         for (let i = 0; i < s.length; i++) if (cover[i]) { s[i] += data[i]; c[i]++; }
       } else {
         for (let i = 0; i < s.length; i++) { s[i] += data[i]; c[i]++; }
@@ -608,7 +689,14 @@
       if (acc.odd) {
         const odd = index % 2;
         const h = odd ? acc.odd : acc.even, hc = odd ? acc.cntOdd : acc.cntEven;
-        if (cover) {
+        if (weight) {
+          for (let i = 0; i < h.length; i++) {
+            if (cover && !cover[i]) continue;
+            const w = weight[i];
+            if (!(w > 0)) continue;
+            h[i] += data[i] * w; hc[i] += w;
+          }
+        } else if (cover) {
           for (let i = 0; i < h.length; i++) if (cover[i]) { h[i] += data[i]; hc[i]++; }
         } else {
           for (let i = 0; i < h.length; i++) { h[i] += data[i]; hc[i]++; }
@@ -1317,7 +1405,7 @@
       DEFAULTS, toGray, discCentroid, grayMat, centreShift, quarterNorm,
       solveGlobal, warpToCanvas, buildAPs, discMaskMat, measureField,
       fillNaN, densify, ramps, subpixel,
-      newAccumulator, accumulate, finishAcc, render,
+      newAccumulator, accumulate, finishAcc, render, cellQuality, cellWeights, densifyWeights,
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean, mat32F, releaseScratch,
       edgeProfile, psfFromProfile, richardsonLucy, bilinear, buildSupport, measureRinging,
       waveletSharpen,

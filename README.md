@@ -367,6 +367,53 @@ where it returns a degenerate zero because the corona falls off outward and the
 far-field "plateau" is dimmer than the near-limb signal. It is reported only
 where the geometry suits it.
 
+### Weighting the stack on local seeing, and why it is off
+
+The displacement field already grades every part of every frame, so weighting
+each patch by how sharp it is there looks like the sophisticated form of lucky
+imaging: seeing is local, and discarding a whole frame throws away its good half
+along with its bad one. Built (`--seeing P` in the harness, exponent `P` on the
+per-cell quality ratio), measured, and left off by default, because it loses.
+
+Quality per cell is the mid-band over high-band energy ratio, graded against the
+80th percentile of the *same cell across frames* — never against other cells in
+the same frame, which would only rediscover that the disc centre has more
+contrast than the limb.
+
+| exponent | fine gain | mid gain |
+|---|---|---|
+| 0 (off) | **1.267x** | **1.144x** |
+| 2 | 1.215x | 1.088x |
+| 4 | 1.092x | 0.969x |
+
+Monotonically worse, and on the totality clip worse than doing nothing at all
+(0.911x fine). The reason is not that local weighting is a bad idea but that
+**the metric is not measuring the atmosphere**. Seeing evolves over tens of
+milliseconds, so at 60 fps adjacent frames sit well inside its coherence time
+and a real signal has to correlate between them. Autocorrelation of the per-cell
+quality series says otherwise:
+
+| clip | lag 1 | lag 2 | lag 3 | lag 4 |
+|---|---|---|---|---|
+| C0013 full disc | 0.081 | -0.008 | **0.412** | -0.080 |
+| C0092 totality | 0.167 | 0.052 | 0.095 | 0.094 |
+
+C0013 spikes at lag 3, which is the GOP period: the metric is largely grading
+H.264 picture type, exactly the trap the raw Laplacian fell into, and
+band-limiting suppresses it only partly. C0092 is weak decay with no structure —
+noise. Neither shows the strong short-lag correlation real seeing would produce.
+
+So the earlier whole-frame result holds locally as well, and for the same
+physical reason: a dense solar ND filter forces a long exposure that averages
+the seeing *inside* each frame, leaving little frame-to-frame variation for any
+metric to find. It also costs 217 ms/frame, roughly four minutes on a
+1140-frame clip.
+
+**It is kept, not deleted**, because the diagnostic is the useful part. Shoot
+manual at the fastest shutter the filter allows and the lag-1 correlation is the
+number that says whether weighting will now pay. Check that before turning the
+exponent up.
+
 ### Alignment points on a corona
 
 Selecting alignment points by masking at 0.45 of peak brightness and eroding by
