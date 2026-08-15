@@ -617,18 +617,23 @@
           const roi = warped.roi(new cv.Rect(x0, y0, w, h));
           roi.convertTo(f, cv.CV_32F);
           roi.delete();
+          // Gate on the mean, not the peak. Zero-mean noise raises the maximum
+          // of a 150x150 cell by several sigma, so a peak-based gate admits
+          // empty sky as soon as noise exceeds about 4 DN -- at sigma 8 it
+          // graded 8 extra cells that contain nothing but grain. The mean is
+          // unmoved by zero-mean noise.
           const mm = cv.minMaxLoc(f);
-          if (mm.maxVal < 12) continue;                 // nothing here worth grading
+          if (mm.maxVal < 12 || cv.mean(f)[0] < 5) continue;
           cv.GaussianBlur(f, a, new cv.Size(0, 0), 1.4);
           cv.GaussianBlur(f, b, new cv.Size(0, 0), 3.2);
           cv.subtract(a, b, a);
-          cv.GaussianBlur(f, c, new cv.Size(0, 0), 0.6);
-          cv.GaussianBlur(f, d, new cv.Size(0, 0), 1.2);
+          cv.GaussianBlur(f, c, new cv.Size(0, 0), 3.2);
+          cv.GaussianBlur(f, d, new cv.Size(0, 0), 7.0);
           cv.subtract(c, d, c);
-          let mid = 0, hi = 0;
+          let fine = 0, mid = 0;
           const A = a.data32F, C = c.data32F;
-          for (let k = 0; k < A.length; k++) { mid += A[k] * A[k]; hi += C[k] * C[k]; }
-          q[j * NG + i] = mid / (hi + 1e-9);
+          for (let k = 0; k < A.length; k++) { fine += A[k] * A[k]; mid += C[k] * C[k]; }
+          q[j * NG + i] = fine / (mid + 1e-9);
         }
       }
       for (const m of [f, a, b, c, d]) m.delete();
@@ -672,6 +677,13 @@
     }
 
     function accumulate(acc, data, cover, index, weight) {
+      // An accumulator built without `weighted` counts in Uint16, so `cnt += 0.75`
+      // truncates to zero and finishAcc then divides a real sum by nothing: the
+      // stack comes out uniformly black with no error anywhere. Refuse the
+      // combination rather than lose the data quietly.
+      if (weight && !acc.weighted) {
+        throw new Error('accumulate: weights require newAccumulator(canvas, halves, true)');
+      }
       const s = acc.sum, c = acc.cnt;
       if (weight) {
         for (let i = 0; i < s.length; i++) {
@@ -1284,6 +1296,26 @@
     // sensor and codec noise are broadband, so the ratio ranks by sharpness
     // rather than by how grainy a frame happens to be. Ranking on raw
     // high-frequency energy instead selects the noisiest frames — measured.
+    // Band ratio, fine over mid. Both bands are signal-dominated, so the ratio
+    // measures the shape of the spectrum: blur removes fine detail faster than
+    // mid detail and the ratio falls. Scaling the image scales both bands
+    // equally, so it is invariant to contrast.
+    //
+    // This replaces a fine-over-noise-band ratio (1.4-3.2 over 0.6-1.2) that was
+    // non-monotonic in blur. Blurring suppresses 0.6-1.2 faster than it
+    // suppresses 1.4-3.2, so the old ratio ROSE with blur unless noise held the
+    // denominator up. On a textured synthetic disc, noise added after the blur
+    // as a sensor does:
+    //
+    //   sensor noise   blur 0   blur 1.0   blur 2.5
+    //   sigma 0          4.18       8.50      24.71   backwards
+    //   sigma 2          3.16       4.49       3.32   peaks at 1.0 px
+    //   sigma 4          2.00       2.14       1.18   peaks at 1.0 px
+    //   sigma 8          0.94       0.85       0.48   correct
+    //
+    // Consecutive aligned frames of the real footage differ by sigma 1.05 DN, so
+    // the old metric sat in its backwards regime on exactly the material it was
+    // written for, and ranked a 1 px-blurred frame above a sharp one.
     function frameQuality(warped, canvas, size) {
       const s = Math.min(size || 700, canvas);
       const x0 = ((canvas - s) / 2) | 0;
@@ -1294,14 +1326,14 @@
       cv.GaussianBlur(f, a, new cv.Size(0, 0), 1.4);
       cv.GaussianBlur(f, b, new cv.Size(0, 0), 3.2);
       cv.subtract(a, b, a);
-      cv.GaussianBlur(f, c, new cv.Size(0, 0), 0.6);
-      cv.GaussianBlur(f, d, new cv.Size(0, 0), 1.2);
+      cv.GaussianBlur(f, c, new cv.Size(0, 0), 3.2);
+      cv.GaussianBlur(f, d, new cv.Size(0, 0), 7.0);
       cv.subtract(c, d, c);
-      let mid = 0, hi = 0;
+      let fine = 0, mid = 0;
       const A = a.data32F, C = c.data32F;
-      for (let i = 0; i < A.length; i++) { mid += A[i] * A[i]; hi += C[i] * C[i]; }
+      for (let i = 0; i < A.length; i++) { fine += A[i] * A[i]; mid += C[i] * C[i]; }
       roi.delete(); f.delete(); a.delete(); b.delete(); c.delete(); d.delete();
-      return mid / (hi + 1e-9);
+      return fine / (mid + 1e-9);
     }
 
     // Nested accumulators, one per keep fraction, over a small region of
@@ -1323,9 +1355,23 @@
       const s = curve.size;
       const x0 = Math.max(0, Math.min(warped.cols - s, (curve.cx - s / 2) | 0));
       const y0 = Math.max(0, Math.min(warped.rows - s, (curve.cy - s / 2) | 0));
+      // A submatrix keeps its parent's row stride and reports isContinuous
+      // false, and the `.data` accessor ignores stride: it hands back
+      // total()*elemSize() bytes straight from the ROI origin. For a 512-wide
+      // window on a 2100-wide canvas that is 125 parent rows chopped into
+      // 512-px strips, sweeping across each row four times -- a scrambled
+      // image, not the patch. The trade-off curve was measured on that, which
+      // is why its rms barely moved when the frames were visibly sharper.
+      //
+      // copyTo materialises a continuous Mat; `.data` is then safe. ucharPtr
+      // also respects stride if a Mat op is not wanted. Never read `.data`
+      // from a roi, and note that clone() does NOT help -- it is correct for
+      // OpenCV operations but still reports the parent stride.
       const roi = warped.roi(new cv.Rect(x0, y0, s, s));
-      const buf = new Uint8Array(roi.data);      // roi is a view; copy to read rows contiguously
+      const patch = new cv.Mat();
+      roi.copyTo(patch);
       roi.delete();
+      const buf = patch.data;
       for (let k = 0; k < FRACTIONS.length; k++) {
         if (rankFrac > FRACTIONS[k]) continue;   // this frame is not in the best f
         const set = curve.sets[k];
@@ -1334,6 +1380,7 @@
         set.n++;
         if (seq % 2) set.nOdd++; else set.nEven++;
       }
+      patch.delete();
     }
 
     function curveResult(curve) {
@@ -1404,7 +1451,7 @@
     return {
       DEFAULTS, toGray, discCentroid, grayMat, centreShift, quarterNorm,
       solveGlobal, warpToCanvas, buildAPs, discMaskMat, measureField,
-      fillNaN, densify, ramps, subpixel,
+      fillNaN, densify, ramps, subpixel, correlate, lcg,
       newAccumulator, accumulate, finishAcc, render, cellQuality, cellWeights, densifyWeights,
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean, mat32F, releaseScratch,
       edgeProfile, psfFromProfile, richardsonLucy, bilinear, buildSupport, measureRinging,

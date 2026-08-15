@@ -157,15 +157,57 @@ the dependence entirely.
 
 ### Why selection fails here, physically
 
-A dense solar ND filter forces a long exposure, a high gain, or both. The high
-gain produced the large single-frame noise, which is why stacking wins so
-clearly. The long exposure **time-averaged the seeing inside each frame**, which
-is why there was almost no frame-to-frame sharpness variation left to select on.
-Both observations are the same fact.
+**This section previously said the ND filter forces a long exposure that
+time-averages the seeing inside each frame. That was wrong**, and the numbers
+say so. Ian's stated capture is 20 stops of ND at f/11 and ISO 800. Solar disc
+luminance at ground level is about 1.6e9 cd/m2, so through 20 stops it is
+1.5e3 cd/m2 and the correct exposure is
 
-For a capture where lucky imaging would pay, use manual exposure with the
-fastest shutter the filter allows and accept the ISO: stacking removes sensor
-noise, but nothing removes seeing blur baked into an exposure.
+    t = N^2 K / (L S) = 121 * 12.5 / (1524 * 800) = 1.2 ms
+
+Nothing about a solar filter forces a long exposure -- the sun is bright enough
+that 20 stops still leaves you at 1/800 s. At 1.2 ms the shutter is *shorter*
+than the atmospheric coherence time, so the seeing is frozen in each frame, not
+averaged. The old explanation described the opposite of what happened.
+
+The real reason is the aperture, and it comes out of the footage itself. The
+fitted solar radius is 931.7 px against a 1919 arcsec disc, giving 1.03
+arcsec/px; with a 1-inch sensor at full-width 4K that is a 689 mm focal length,
+so f/11 means **D = 63 mm**. Noll gives the wavefront error left after tip and
+tilt are removed:
+
+    sigma^2 = 0.134 (D/r0)^(5/3) rad^2
+
+At r0 = 5 cm this is 0.19 rad^2 -- **a Strehl ratio of 0.82**. The frames are
+already near diffraction-limited (lambda/D = 1.81 arcsec = 1.76 px, against
+1.1-3.7 px of free-air seeing) and there is very little sharpness variation for
+selection to choose between. What the atmosphere does at this aperture is
+mostly *move* the image: tip and tilt carry 87% of the total wavefront
+variance, and alignment already removes that. The predicted tilt is 0.5-1.4 px
+rms for r0 = 3-10 cm, and the harness measures a 0.72 px displacement field --
+so r0 is around 5-7 cm and the model is in the right regime.
+
+Lucky imaging pays when D/r0 is large. `tools/seeing-study.js` runs the model
+across apertures with tilt removed, so only blur varies:
+
+| aperture | D/r0 | Strehl | sharpness spread | selection gain |
+|---|---|---|---|---|
+| 63 mm (this footage) | 1.25 | 0.823 | 30.9% | 1.039x |
+| 100 mm | 2.00 | 0.653 | 24.5% | 1.039x |
+| 150 mm | 3.00 | 0.433 | 43.8% | 1.064x |
+| 300 mm | 6.00 | 0.070 | 54.7% | 1.110x |
+
+**Honest gap:** the model predicts 1.039x at this aperture where the footage
+measures 1.000x. At r0 = 10 cm the model gives 1.013x, much closer -- but the
+0.72 px tilt points to r0 nearer 5-7 cm, so the two estimates disagree. The
+model brackets the answer at 1.3-3.9% against a measured 1% or less. It has the
+regime right and overstates the size, which is what an 18-mode Zernike
+truncation with a chosen rather than derived temporal decorrelation would do.
+Do not read it as confirmation, only as consistency.
+
+So the advice stands but for a different reason: **a bigger aperture is what
+would make lucky imaging pay here, not a faster shutter.** The shutter is
+already fast enough.
 
 ### Two things this measurement got wrong
 
@@ -367,6 +409,110 @@ where it returns a degenerate zero because the corona falls off outward and the
 far-field "plateau" is dimmer than the near-limb signal. It is reported only
 where the geometry suits it.
 
+## Unit tests, and the three bugs they found
+
+`node tools/test-pipeline.js` -- 46 tests, 240 checks, no dependencies. Each one
+constructs an input whose correct output is known analytically, or checks
+against an independent slower computation (brute-force coverage, direct
+convolution), so a regression cannot be blessed by updating a golden number.
+
+Every bug this project had hit before was found by accident: a stack that looked
+wrong, a statistic that moved the wrong way, a user reporting 188 dropped
+frames. Writing tests found three more, one of which invalidated a headline
+measurement.
+
+### The sharpness metric was non-monotonic in blur
+
+`frameQuality` ranked frames on fine-band energy over a *noise-band* (1.4-3.2
+over 0.6-1.2). Blurring suppresses the 0.6-1.2 band faster than 1.4-3.2, so the
+ratio **rose** with blur unless noise held the denominator up. On a textured
+synthetic disc, with noise added after the blur as a sensor does:
+
+| sensor noise | blur 0 | blur 1.0 | blur 2.5 | |
+|---|---|---|---|---|
+| sigma 0 | 4.18 | 8.50 | 24.71 | backwards |
+| sigma 2 | 3.16 | **4.49** | 3.32 | peaks at 1.0 px |
+| sigma 4 | 2.00 | **2.14** | 1.18 | peaks at 1.0 px |
+| sigma 8 | **0.94** | 0.85 | 0.48 | correct |
+
+Consecutive aligned frames of the real footage differ by **sigma 1.05 DN**, so
+the metric sat in its backwards regime on exactly the material it was written
+for, ranking a 1 px-blurred frame above a sharp one. It is now fine-over-mid
+(1.4-3.2 over 3.2-7.0): both bands are signal-dominated, the ratio falls
+monotonically with blur at every noise level tested, and it stays invariant to
+contrast.
+
+The test that catches this only works because the noise is applied *after* the
+blur. Blurring an already-noisy frame suppresses the noise too, which flatters
+any metric that divides by a noise-dominated band -- which is how the original
+passed inspection.
+
+### The trade-off curve was measured on a scrambled image
+
+`accumulateCurve` read its region of interest with `new Uint8Array(roi.data)`.
+A submatrix keeps its parent's row stride and reports `isContinuous` false, and
+the `.data` accessor **ignores stride**: it returns `total() * elemSize()` bytes
+straight from the ROI origin. For a 512-wide window on a 2100-wide canvas that
+is 125 parent rows chopped into 512-px strips, sweeping across each row four
+times. The curve was computed on that.
+
+It still looked like plausible data, so nothing downstream complained -- it just
+stopped responding to sharpness. On synthetic frames where selecting the best
+25% demonstrably improves fine detail by 17%, the curve reported 0.3%.
+
+Worth knowing for the rest of the codebase: **`clone()` does not fix this.** A
+cloned ROI is correct for OpenCV operations -- `ucharPtr` and `reduce` both read
+it properly -- but it still reports the parent stride, so `.data` is still
+wrong. `copyTo` into a fresh Mat is the fix. This was the only such site;
+everywhere else reads `.data` from full-size continuous Mats.
+
+### Weights on an integer accumulator silently produced black
+
+`newAccumulator(canvas, halves)` counts in Uint16, so `cnt += 0.75` truncates to
+zero and `finishAcc` then divides a real sum by nothing. The stack comes out
+uniformly black with no error raised anywhere. It now throws.
+
+### What the fixes changed
+
+Both measurements were re-run. **The headline conclusion survives**, and now
+rests on numbers that mean something:
+
+| keep | frames | r | rms | A |
+|---|---|---|---|---|
+| 5% | 15 | 0.940 | 1.212 | 1.175 |
+| 25% | 75 | 0.991 | 1.278 | 1.273 |
+| 100% | 300 | 0.998 | 1.390 | **1.389** |
+
+Before the fix `rms` was ~6.8 (scrambled) and `r` was saturated at 0.9999.
+Now `r` spans 0.94-0.998 and discriminates, and a unit test proves the curve can
+detect a sharpness difference when one exists. Stacking everything still wins.
+
+## The atmospheric model
+
+`tools/seeing.js` is a Kolmogorov seeing model matched to this footage, because
+every claim about alignment is a claim about atmospheric distortion and the
+tests only ever applied a uniform shift -- the one case multi-point alignment is
+not for.
+
+It generates a smoothly varying displacement field with the ground truth for it,
+plus a per-field-point PSF from Zernike modes 4-21 with Noll variances, under
+frozen flow so angular and temporal decorrelation come from one mechanism.
+Parameters are derived in the file: 1.03 arcsec/px, D = 63 mm, 25 fps, 1.2 ms.
+
+One parameter matters more than the rest. **Daytime solar seeing is
+ground-layer dominated**, not set by the high layers that give the 2-4 arcsec
+isoplanatic angle quoted for nighttime astronomy. At 3 arcsec the layer sits at
+1.1 km, tilt decorrelates over 12 px, and an 80 px alignment patch averages
+seven independent cells into mush -- multi-point alignment could not work at
+all. At 20 arcsec the layer is at 160 m and tilt stays coherent over 77 px,
+which a 100 px grid can track. The footage shows a coherent field, so the
+ground-layer value is the right one.
+
+This buys the first ground-truth test of the project's core claim:
+**multi-point alignment lands closer to the true undistorted scene than global
+alignment does.** Split-half reliability could never show that -- it says how
+reproducible a stack is, not how close to correct.
+
 ### Weighting the stack on local seeing, and why it is off
 
 The displacement field already grades every part of every frame, so weighting
@@ -382,12 +528,13 @@ contrast than the limb.
 
 | exponent | fine gain | mid gain |
 |---|---|---|
-| 0 (off) | **1.267x** | **1.144x** |
-| 2 | 1.215x | 1.088x |
-| 4 | 1.092x | 0.969x |
+| 0 (off) | 1.245x | 1.161x |
+| 1 | **1.247x** | 1.161x |
+| 2 | 1.245x | 1.161x |
 
-Monotonically worse, and on the totality clip worse than doing nothing at all
-(0.911x fine). The reason is not that local weighting is a bad idea but that
+Flat. **These are the numbers after the sharpness metric was fixed**; measured
+with the old metric it was monotonically worse (1.267x down to 1.092x), which
+was the metric mis-ranking frames rather than weighting being harmful. The reason is not that local weighting is a bad idea but that
 **the metric is not measuring the atmosphere**. Seeing evolves over tens of
 milliseconds, so at 60 fps adjacent frames sit well inside its coherence time
 and a real signal has to correlate between them. Autocorrelation of the per-cell

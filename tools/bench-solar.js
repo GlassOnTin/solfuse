@@ -24,6 +24,7 @@ const TAPER = opt('--taper', null);
 const COARSE = opt('--coarse', null);
 const MINAPS = opt('--minaps', null);
 const SEEING = Number(opt('--seeing', 0));   // exponent on local quality; 0 disables
+const CURVE = args.includes('--curve');      // selection trade-off A(f)
 
 if (!SRC) { console.error('usage: bench-solar.js <video> [--frames N] [--write DIR]'); process.exit(1); }
 
@@ -77,6 +78,7 @@ function frameReader(file, w, h) {
   let refQuarter = null, shifts = [], eccFail = 0, rHint = null;
   const NG0 = Math.round(o.canvas / o.step);
   const qual = new Array(N).fill(null);
+  const frameQ = new Array(N).fill(null);
   const eccReasons = new Map();
   const r1 = frameReader(SRC, w, h);
   for (let i = 0; i < N; i++) {
@@ -101,6 +103,7 @@ function frameReader(file, w, h) {
     const m = P.warpToCanvas(gray, w, h, g.C, o.canvas);
     P.accumulate(acc1, m.data, P.coverageOf(g.C, w, h, o.canvas), i);
     if (SEEING) qual[i] = P.cellQuality(m, o.canvas, NG0, o);
+    if (CURVE) frameQ[i] = P.frameQuality(m, o.canvas, 700);
     m.delete();
     if ((i + 1) % 100 === 0) process.stdout.write(`\r  pass 1: ${i + 1} frames`);
   }
@@ -193,6 +196,29 @@ function frameReader(file, w, h) {
                 `${(100 * (1 - vGlob / vTot)).toFixed(0)}% local`);
   }
 
+  // Rank frames sharpest first, exactly as the worker does, so the harness
+  // measures the same selection the app would make.
+  let rankOf = null, curve = null;
+  if (CURVE) {
+    const graded = [];
+    frameQ.forEach((q, i) => { if (q != null) graded.push([i, q]); });
+    if (graded.length >= 8) {
+      graded.sort((a, b) => b[1] - a[1]);
+      rankOf = new Map();
+      graded.forEach(([i], k) => rankOf.set(i, (k + 1) / graded.length));
+      let cx = o.canvas / 2, cy = o.canvas / 2;
+      if (aps && aps.length) {
+        const best = aps.reduce((p, a) => (a.contrast > p.contrast ? a : p), aps[0]);
+        cx = best.x; cy = best.y;
+      }
+      curve = P.newCurve(Math.min(512, o.canvas), cx, cy);
+      const qs = graded.map(([, q]) => q);
+      console.log(`  sharpness ranking over ${graded.length} frames, ` +
+                  `best ${qs[0].toFixed(4)} worst ${qs[qs.length - 1].toFixed(4)} ` +
+                  `(spread ${(100 * (qs[0] / qs[qs.length - 1] - 1)).toFixed(1)}%)`);
+    }
+  }
+
   const wmap = SEEING ? new Float32Array(o.canvas * o.canvas) : null;
   let usedTotal = 0, fieldMag = [], wStats = [];
   const r2 = frameReader(SRC, w, h);
@@ -219,6 +245,7 @@ function frameReader(file, w, h) {
       if (nw) wStats.push(sw / nw);
     }
     P.accumulate(acc2, out.data, P.coverageOf(transforms[i], w, h, o.canvas), i, wmap);
+    if (curve && rankOf && rankOf.has(i)) P.accumulateCurve(curve, out, rankOf.get(i), i);
     warped.delete(); out.delete();
     if ((i + 1) % 100 === 0) process.stdout.write(`\r  pass 2: ${i + 1} frames`);
   }
@@ -233,6 +260,22 @@ function frameReader(file, w, h) {
     console.log(`    frame weight: median ${ws[ws.length >> 1].toFixed(3)}, ` +
                 `range ${ws[0].toFixed(3)} to ${ws[ws.length - 1].toFixed(3)}, ` +
                 `effective frames ${(wStats.reduce((a, b) => a + b, 0)).toFixed(1)} of ${acc2.frames}`);
+  }
+
+  if (curve) {
+    const r = P.curveResult(curve);
+    if (r && r.points && r.points.length) {
+      console.log('\n  selection trade-off A(f) = sqrt(r_f) * rms_fine, over the sharpest f of frames');
+      console.log('    keep    frames        r      rms      A');
+      for (const pt of r.points) {
+        console.log(`    ${(100 * pt.fraction).toFixed(0).padStart(4)}%  ${String(pt.frames).padStart(6)}  ` +
+                    `${pt.r != null ? pt.r.toFixed(5).padStart(8) : '       -'}  ` +
+                    `${pt.rms != null ? pt.rms.toFixed(3).padStart(7) : '      -'}  ` +
+                    `${pt.amplitude != null ? pt.amplitude.toFixed(3).padStart(6) : '     -'}`);
+      }
+      console.log(`    best at ${(100 * r.bestFraction).toFixed(0)}% (${r.bestFrames} frames), ` +
+                  `gain over using everything ${r.gainOverAll != null ? r.gainOverAll.toFixed(3) + 'x' : 'n/a'}`);
+    }
   }
 
   // ---- split-half reliability ---------------------------------------------
