@@ -627,6 +627,12 @@
     // own 0..1 range. `sign` is +1 when the bright side is outside the circle.
     function edgeProfile(img, w, h, circle, sign, o) {
       const span = (o && o.span) || 18, step = (o && o.step) || 0.1;
+      // Contrast and flatness thresholds have to scale with the target. A solar
+      // crescent gives a flat bright plateau; the corona at totality is faint
+      // and falls off with radius, so fixed limits reject every profile and the
+      // measurement reports "not clean enough" on perfectly usable data.
+      const minContrast = (o && o.minContrast) || 40;
+      const rippleFrac = (o && o.rippleFrac) || 0.06;
       const n = Math.round((2 * span) / step) + 1;
       const acc = new Float64Array(n);
       const off = new Float64Array(n);
@@ -643,12 +649,13 @@
         let dark = 0, bright = 0;
         for (let i = 0; i < edge; i++) { dark += prof[i]; bright += prof[n - 1 - i]; }
         dark /= edge; bright /= edge;
-        if (bright - dark < 40) continue;                 // not an edge here
+        if (bright - dark < minContrast) continue;          // not an edge here
         let vd = 0, vb = 0;
         for (let i = 0; i < edge; i++) {
           vd += (prof[i] - dark) ** 2; vb += (prof[n - 1 - i] - bright) ** 2;
         }
-        if (Math.sqrt(vd / edge) > 6 || Math.sqrt(vb / edge) > 6) continue;   // not flat either side
+        const ripple = rippleFrac * (bright - dark);
+        if (Math.sqrt(vd / edge) > ripple || Math.sqrt(vb / edge) > ripple) continue;  // not flat either side
         const k = 1 / (bright - dark);
         for (let i = 0; i < n; i++) acc[i] += (prof[i] - dark) * k;
         used++;

@@ -680,10 +680,20 @@ function drawPSF(r) {
       (r.kurtosis < 2.6 ? 'flat-topped, defocus-like'
         : r.kurtosis > 3.6 ? 'heavy-tailed, seeing-like' : 'close to gaussian')],
     ['Re-projection error', `${(100 * r.residual).toFixed(1)}%`],
+    ['Sampling span', `±${r.span || '?'} px${r.rung && r.rung !== 'disc' ? ` (${r.rung} threshold)` : ''}`],
   ];
+  if (r.unstable) {
+    rows.push(['Width stability', 'does not settle — treat as an upper bound']);
+  }
   $('psfTable').innerHTML = rows.map(([a, b]) =>
     `<tr><td>${a}</td><td class="v">${b}</td></tr>`).join('');
   $('psfbox').hidden = false;
+  if (r.unstable) {
+    rows.push(['Why', 'The bright side has no flat plateau — the corona declines all the way out — ' +
+                      'so the measured width grows with whatever span is chosen. The shape is still ' +
+                      'informative; the absolute width is not.']);
+    $('psfTable').innerHTML = rows.map(([a, b]) => `<tr><td>${a}</td><td class="v">${b}</td></tr>`).join('');
+  }
   $('deconvNote').textContent = r.kurtosis < 2.6
     ? 'Flat-topped: defocus. Deconvolution should help a lot here.'
     : 'Heavy-tailed: seeing-limited. Deconvolution helps, but less than for defocus.';

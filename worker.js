@@ -92,6 +92,82 @@ function sendPreview(acc, phase, grid) {
   post(msg, transfer);
 }
 
+// One rung of the PSF ladder: find a limb at this threshold and sample it.
+// Returns null rather than throwing, so the caller can try the next rung.
+function tryPSF(g, rung) {
+  const geom = P.discGeometry(g, O.canvas, O.canvas, rung.frac, 1);
+  if (!geom) return null;
+  const opts = { span: rung.span, minContrast: rung.minContrast, rippleFrac: rung.rippleFrac };
+
+  const attempts = [];
+  const sol = P.fitLimb(geom, { inside: true, iters: 3000 });
+  if (sol) {
+    // Anything off the solar arc may belong to a lunar limb.
+    const rest = [];
+    for (let i = 0; i < geom.edge.length; i += 2) {
+      const dx = geom.edge[i] - sol.cx, dy = geom.edge[i + 1] - sol.cy;
+      if (Math.abs(Math.hypot(dx, dy) - sol.r) > 4) rest.push(geom.edge[i], geom.edge[i + 1]);
+    }
+    if (rest.length > 600) {
+      const lun = P.fitLimb(Object.assign({}, geom, { edge: rest }), { inside: false, iters: 4000 });
+      // the Moon is the better knife edge: no atmosphere, no limb darkening
+      if (lun && lun.inliers > 300) attempts.push({ source: 'lunar', circle: lun, sign: +1, sol });
+    }
+    attempts.push({ source: 'solar', circle: sol, sign: -1, sol });
+  }
+  // Totality: a corona ring around a dark Moon, where neither sense test can
+  // separate the boundaries because both enclose the centroid.
+  const inner = P.fitInnerLimb(geom, { iters: 4000 });
+  if (inner) attempts.push({ source: 'lunar (totality)', circle: inner, sign: +1, sol: null });
+
+  for (const a of attempts) {
+    let prof = P.edgeProfile(g, O.canvas, O.canvas, a.circle, a.sign, opts);
+    if (!prof) continue;
+    let r = P.psfFromProfile(prof, {});
+    if (!r) continue;
+    // The sampling span has to be comfortably wider than the blur. If it is not,
+    // the far end of the profile is still on the rising edge, the contrast is
+    // underestimated and so is the width — an 18 px span measured an 18 px FWHM
+    // that was really over 20. Re-measure once with room to spare.
+    if (r.fwhm > opts.span * 0.6) {
+      const wider = Object.assign({}, opts, { span: Math.min(60, Math.ceil(r.fwhm * 2)) });
+      const p2 = P.edgeProfile(g, O.canvas, O.canvas, a.circle, a.sign, wider);
+      const r2 = p2 && P.psfFromProfile(p2, {});
+      if (r2) { prof = p2; r = r2; opts.span = wider.span; }
+    }
+    // Does the width settle? A real edge has a flat plateau beyond the blur, so
+    // widening the span further should change nothing. The corona has no plateau
+    // — it declines all the way out — so its "width" grows with whatever span
+    // you choose (18.1, 21.4, 23.4, 24.3, 25.1 px at spans 18 to 50 on one
+    // totality stack). When that happens the figure is an upper bound, and
+    // saying so is worth more than quoting the last value confidently.
+    let unstable = false;
+    {
+      const test = Object.assign({}, opts, { span: Math.min(70, Math.round(opts.span * 1.4)) });
+      const p3 = P.edgeProfile(g, O.canvas, O.canvas, a.circle, a.sign, test);
+      const r3 = p3 && P.psfFromProfile(p3, {});
+      if (r3 && Math.abs(r3.fwhm - r.fwhm) / Math.max(1e-6, r.fwhm) > 0.15) unstable = true;
+    }
+    return Object.assign({ psf: r, rung: rung.tag, span: opts.span, unstable }, a);
+  }
+  return null;
+}
+
+function finishPSF(best) {
+  const { psf: r, circle, sol, source, sign } = best;
+  psf = r;
+  // Regions the geometry says are dark: inside the Moon, outside the Sun.
+  const regions = [];
+  if (source.startsWith('lunar')) regions.push({ cx: circle.cx, cy: circle.cy, r: circle.r, mode: 'inside' });
+  if (sol && source !== 'lunar (totality)') regions.push({ cx: sol.cx, cy: sol.cy, r: sol.r, mode: 'outside' });
+  psfCircles = { circle, sol, source, sign };
+  psfSupport = regions.length ? P.buildSupport(O.canvas, regions, 8) : null;
+  const buf = Float32Array.from(r.psf).buffer;
+  post({ type: 'psf', source, rung: best.rung, span: best.span, unstable: best.unstable, k: r.k, sigma: r.sigma, fwhm: r.fwhm,
+         kurtosis: r.kurtosis, residual: r.residual, profiles: r.profiles,
+         radius: circle.r, psf: buf }, [buf]);
+}
+
 const handlers = {
   async begin(m) {
     await ready();
@@ -224,46 +300,25 @@ const handlers = {
     if (!mpaMean) { post({ type: 'error', message: 'Nothing stacked yet.' }); return; }
     const g = new Uint8Array(O.canvas * O.canvas);
     for (let i = 0; i < g.length; i++) g[i] = Math.max(0, Math.min(255, mpaMean[i]));
-    const geom = P.discGeometry(g, O.canvas, O.canvas, O.discFrac, 1);
-    if (!geom) { post({ type: 'psf', error: 'No disc found.' }); return; }
-    const sol = P.fitLimb(geom, { inside: true, iters: 3000 });
-    let source = 'solar', circle = sol, sign = -1;
-    if (sol) {
-      // Anything not on the solar arc may be a lunar limb.
-      const rest = [];
-      for (let i = 0; i < geom.edge.length; i += 2) {
-        const dx = geom.edge[i] - sol.cx, dy = geom.edge[i + 1] - sol.cy;
-        if (Math.abs(Math.hypot(dx, dy) - sol.r) > 4) rest.push(geom.edge[i], geom.edge[i + 1]);
-      }
-      if (rest.length > 600) {
-        const lun = P.fitLimb(Object.assign({}, geom, { edge: rest }), { inside: false, iters: 4000 });
-        if (lun && lun.inliers > 300) { source = 'lunar'; circle = lun; sign = +1; }
-      }
+    // A ladder rather than one setting. A bright full disc, a crescent and the
+    // corona at totality need different thresholds and different sampling spans
+    // — 0.45 of peak with an 18 px span finds nothing on a corona, which is how
+    // this reported "not clean enough" on a perfectly good stack.
+    const ladder = [
+      { frac: O.discFrac, span: 18, minContrast: 40, rippleFrac: 0.06, tag: 'disc' },
+      { frac: 0.30, span: 26, minContrast: 25, rippleFrac: 0.10, tag: 'faint' },
+      { frac: 0.15, span: 34, minContrast: 15, rippleFrac: 0.16, tag: 'corona' },
+    ];
+    let best = null;
+    for (const rung of ladder) {
+      const r = tryPSF(g, rung);
+      if (r) { best = r; break; }
     }
-    if (!circle) {
-      // Totality: a corona ring around a dark Moon. Neither sense test can
-      // separate the boundaries, so fit the inner one directly.
-      const inner = P.fitInnerLimb(geom, { iters: 4000 });
-      if (inner) { source = 'lunar (totality)'; circle = inner; sign = +1; }
+    if (!best) {
+      post({ type: 'psf', error: 'No limb could be measured, at any threshold.' });
+      return;
     }
-    if (!circle) { post({ type: 'psf', error: 'No limb could be fitted.' }); return; }
-    const prof = P.edgeProfile(g, O.canvas, O.canvas, circle, sign, {});
-    if (!prof) { post({ type: 'psf', error: 'The limb was not clean enough to measure.' }); return; }
-    const r = P.psfFromProfile(prof, {});
-    if (!r) { post({ type: 'psf', error: 'Could not recover a PSF.' }); return; }
-    psf = r;
-    // Regions the geometry says are dark: inside the Moon, outside the Sun.
-    // These are known, not inferred, and they are where deconvolution otherwise
-    // invents structure.
-    const regions = [];
-    if (source.startsWith('lunar')) regions.push({ cx: circle.cx, cy: circle.cy, r: circle.r, mode: 'inside' });
-    if (sol && source !== 'lunar (totality)') regions.push({ cx: sol.cx, cy: sol.cy, r: sol.r, mode: 'outside' });
-    psfCircles = { circle, sol, source, sign };
-    psfSupport = regions.length ? P.buildSupport(O.canvas, regions, 8) : null;
-    const buf = Float32Array.from(r.psf).buffer;
-    post({ type: 'psf', source, k: r.k, sigma: r.sigma, fwhm: r.fwhm,
-           kurtosis: r.kurtosis, residual: r.residual, profiles: r.profiles,
-           radius: circle.r, psf: buf }, [buf]);
+    finishPSF(best);
   },
 
   async finish(m) {
