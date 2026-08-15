@@ -460,6 +460,13 @@ It still looked like plausible data, so nothing downstream complained -- it just
 stopped responding to sharpness. On synthetic frames where selecting the best
 25% demonstrably improves fine detail by 17%, the curve reported 0.3%.
 
+`tools/strided-guard.js` wraps the `.data` getters and reports any read from a
+Mat whose rows are not contiguous. Running the whole suite under it reports
+none. The same guard was run against **AstroFuse** (its headless harness) and
+**BracketFuse** (its real worker under a node shim): both are clean, and neither
+takes a submatrix anywhere, so the bug class is absent there rather than merely
+unobserved.
+
 Worth knowing for the rest of the codebase: **`clone()` does not fix this.** A
 cloned ROI is correct for OpenCV operations -- `ucharPtr` and `reduce` both read
 it properly -- but it still reports the parent stride, so `.data` is still
