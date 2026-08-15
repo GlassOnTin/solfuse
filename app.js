@@ -133,14 +133,29 @@ function extractFrames(onFrame, onProgress, rate, range) {
     let seq = 0, lastPresented = null, dropped = 0, lastTime = -1;
     let stop = false;
 
+    let watchdog = null;
     const done = () => {
+      if (watchdog) clearTimeout(watchdog);
       video.pause();
       video.onended = null;
       resolve({ seq, dropped });
     };
+    // Frames are pulled one at a time with playback paused in between, which is
+    // not a pattern browsers are heavily exercised on. If a frame never arrives,
+    // fail with something readable rather than hanging on a dead progress bar.
+    const arm = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        stop = true;
+        video.pause();
+        reject(new Error(`No frame arrived for 30 s at ${video.currentTime.toFixed(1)}s ` +
+                         `(${seq} captured). The tab must stay visible; if it was, this is a decoder stall.`));
+      }, 30000);
+    };
 
     const tick = async (now, md) => {
       if (stop) return;
+      arm();
       // presentedFrames counts every frame the compositor showed. A jump means
       // the decoder could not keep up and frames went past unseen.
       if (lastPresented !== null && md.presentedFrames - lastPresented > 1) {
@@ -152,10 +167,19 @@ function extractFrames(onFrame, onProgress, rate, range) {
       if (t > to) { done(); return; }           // past the end of the chosen range
       if (t > lastTime && t >= from - 1e-6) {   // guard against a repeated frame
         lastTime = t;
+        // Stop the clock while the worker runs. Processing a frame takes
+        // hundreds of milliseconds and frames arrive every 40 ms, so leaving
+        // playback running loses almost all of them: a real run reported 7
+        // frames stacked and 188 dropped. Pausing costs nothing, because the
+        // run was always bound by processing rather than by playback.
+        video.pause();
         g.drawImage(video, 0, 0, w, h);
         const id = g.getImageData(0, 0, w, h);
         await onFrame(id.data, Math.round(t * 1000), seq++);
         if (onProgress) onProgress(t, seq);
+        if (stop) return;
+        if (video.ended) { done(); return; }
+        try { await video.play(); } catch (e) { reject(new Error('Playback stalled: ' + e.message)); return; }
       }
       if (video.ended) { done(); return; }
       video.requestVideoFrameCallback(tick);
@@ -171,6 +195,7 @@ function extractFrames(onFrame, onProgress, rate, range) {
       video.requestVideoFrameCallback(tick);
       video.play().catch((e) => reject(new Error('Could not play the video: ' + e.message)));
     };
+    arm();
     if (Math.abs(video.currentTime - from) < 0.01) start();
     else { video.onseeked = () => { video.onseeked = null; start(); }; video.currentTime = from; }
   });
@@ -413,6 +438,7 @@ function finish(res, ref, p1, p2) {
   compare.hidden = false;
   exports.hidden = false;
   $('psfbox').hidden = false;
+  if (!psfInfo) placeholderPSF('Press “Measure the PSF” to recover it from a limb in this stack.');
   bar.classList.remove('on');
   setStage(4);
   busy = false; go.disabled = false;
@@ -435,8 +461,12 @@ function finish(res, ref, p1, p2) {
   }
   const dropped = (p1.dropped || 0) + (p2.dropped || 0);
   if (dropped > 0) {
-    say(`${bits[0]} — but the decoder dropped ${dropped} frame${dropped > 1 ? 's' : ''}. ` +
-        `The result is still valid, just built from fewer frames.`, true);
+    const rate = dropped / Math.max(1, dropped + res.frames);
+    say(`${bits[0]} — the decoder dropped ${dropped} frame${dropped > 1 ? 's' : ''}` +
+        (rate > 0.3
+          ? `, which is ${(100 * rate).toFixed(0)}% of the video. Almost nothing was stacked. `
+            + `Keep the tab visible and in front, and try a smaller output size.`
+          : `. The result is still valid, just built from fewer frames.`), true);
   }
 }
 
@@ -554,16 +584,41 @@ $('psfGo').addEventListener('click', async () => {
   say('Measuring the PSF from the limb…');
   try {
     const r = await call({ type: 'measurePSF' }, 'psf');
-    if (r.error) { say('PSF: ' + r.error, true); return; }
+    if (r.error) {
+      placeholderPSF(r.error + ' A limb needs a reasonably complete, well-exposed arc.', true);
+      say('PSF: ' + r.error, true);
+      return;
+    }
     psfInfo = r;
     drawPSF(r);
     say(`PSF measured from the ${r.source} limb — FWHM ${r.fwhm.toFixed(2)} px`);
   } catch (e) {
+    placeholderPSF('Measurement failed: ' + e.message, true);
     say('Could not measure the PSF: ' + e.message, true);
   } finally {
     $('psfGo').disabled = false;
   }
 });
+
+// Until a PSF has been measured there is nothing to draw, and an empty canvas
+// reads as a broken feature rather than an unused one. The panel appears as soon
+// as a stack exists, because that is when the button becomes usable, so it needs
+// to say so.
+function placeholderPSF(message, isError) {
+  for (const [id, w, h] of [['psfImg', 128, 128], ['psfProf', 260, 128]]) {
+    const c = $(id);
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, w, h);
+    g.strokeStyle = isError ? '#ff6b6b' : '#33291f';
+    g.setLineDash([4, 4]); g.strokeRect(4, 4, w - 8, h - 8); g.setLineDash([]);
+    g.fillStyle = isError ? '#ff6b6b' : '#6b5c48';
+    g.font = '12px system-ui'; g.textAlign = 'center';
+    g.fillText(isError ? 'no PSF' : 'not measured', w / 2, h / 2 + 4);
+  }
+  $('psfCap').textContent = '';
+  $('psfTable').innerHTML = `<tr><td colspan="2" style="color:${isError ? 'var(--bad)' : 'var(--dim)'}">${message}</td></tr>`;
+}
 
 // The kernel itself, on a log scale. Linear display shows a single bright dot
 // and hides the wings, which are exactly what distinguishes seeing from defocus.
@@ -728,7 +783,7 @@ if (!window.Worker || !window.OffscreenCanvas || !HTMLVideoElement.prototype.req
 // frame extraction is driven directly through these during testing.
 window.__sf.ui = {
   onPreview, drawOverlay, drawTimeline, setStage, showStats, finish, setWipe,
-  drawPSF,
+  drawPSF, placeholderPSF,
   setAPs: (pos, canvas, grid) => { apPositions = pos; apCanvas = canvas; indexAPs(grid); drawOverlay(); },
   setTrack: (t) => { track = t; drawTimeline(); },
 };
