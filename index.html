@@ -172,6 +172,7 @@ footer a { color: var(--dim); }
     <button id="go" disabled>Stack</button>
     <label><input id="doMulti" type="checkbox" checked> Multi-point alignment</label>
     <label><input id="doCurve" type="checkbox" checked> Measure selection trade-off</label>
+    <label><input id="doColour" type="checkbox"> Colour &mdash; stacks red and blue alongside green</label>
     <label>Output
       <select id="canvas">
         <option value="1400">1400 px</option>
@@ -286,6 +287,7 @@ footer a { color: var(--dim); }
       at 1.00 the image is reconstructed exactly. Sensor and codec noise live mostly in the ~1 px
       band, so lifting ~2 and ~4 px while holding ~1 px at or below 1.00 sharpens structure without
       amplifying grain. Re-renders from the finished stack, so it is instant.</p>
+    <div class="ctl"><span>Colour saturation</span><input type="range" id="saturation" min="0" max="2.5" step="0.05" value="1"><output>1.00</output></div>
     <div class="ctl"><span>Unsharp (legacy)</span><input type="range" id="sharpen" min="0" max="2.5" step="0.05" value="0"><output>0.00</output></div>
     <div class="ctl"><span>Unsharp radius</span><input type="range" id="radius" min="0.8" max="6" step="0.1" value="2.4"><output>2.40</output></div>
     <div class="ctl"><span>Point spacing</span><input type="range" id="step" min="60" max="210" step="10" value="100"><output>100</output></div>
@@ -314,6 +316,6 @@ document.getElementById('copyDiag').addEventListener('click', function () {
 </script>
 <!-- ?v= is the cache buster; Pages serves max-age=600. app.js passes it to
      worker.js, which passes it to pipeline.js. Bump with tools/bump-cache.sh. -->
-<script src="app.js?v=28" type="module"></script>
+<script src="app.js?v=29" type="module"></script>
 </body>
 </html>

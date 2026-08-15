@@ -409,6 +409,95 @@ where it returns a degenerate zero because the corona falls off outward and the
 far-field "plateau" is dimmer than the near-limb signal. It is reported only
 where the geometry suits it.
 
+## Colour
+
+Off by default, and the default is the measured answer rather than a guess.
+
+Alignment, the PSF, deconvolution, the trade-off curve and every statistic run
+on green exactly as they do in mono -- the green plane the worker receives is a
+zero-copy subarray of the planar frame and is byte-identical to the grayscale a
+mono run sends. Red and blue ride along through the same affine and the same
+displacement field. Measuring the field per channel would cost three times as
+much and could disagree between channels, which is how colour fringing gets
+manufactured.
+
+### Whether it is worth turning on depends entirely on the footage
+
+| clip | mean R | mean G | mean B | channels identical | median saturation |
+|---|---|---|---|---|---|
+| C0013 white light | 179.9 | 179.9 | 179.9 | **100.0%** of lit pixels | 0.0% |
+| C0092 totality | 181.8 | 123.4 | 79.5 | 2.0% | 62.9% |
+
+The white-light clip is not approximately grey, it is **bit-identical across all
+three channels in every lit pixel**. Colour mode on that footage costs three
+times the transfer to reproduce the mono result exactly. Totality is the
+opposite: prominences are H-alpha red and the corona is not neutral either.
+
+So the app measures it and says which one you have, rather than leaving you to
+wonder why your stack came out grey.
+
+### The composite is LRGB
+
+Luminance carries all the processing -- stacking, deconvolution, wavelets,
+sharpening -- and colour is applied on top as a ratio, low-passed with a 3 px
+Gaussian by default.
+
+Sharpening chroma is the thing to avoid. Colour noise is largely uncorrelated
+between channels, so any high-pass on the ratios turns it into coloured speckle,
+and soft colour reads far better than noisy colour. Blurring costs nothing
+visible on a solar disc, where the sharp structure is all luminance anyway. The
+test measures this: blurring the ratios cuts the channel spread by more than
+half while the luminance stays within 2 DN of the mono render.
+
+The ratios are taken against the **raw** stacked green, not the sharpened
+luminance. Taking them against the processed green would set deconvolution
+overshoot against unsharpened red and blue, and fringe every edge.
+
+### The colour statistic needed fixing before it could be trusted
+
+The first version gated on an absolute 8 DN and reported **51.8% median
+saturation for a corona that is close to white**. The totality clip carries a
+blue pedestal in the dark sky -- blue clears 8 DN in 88% of pixels where green
+clears it in 19% -- so the gate admitted the whole sky, and saturation is a
+ratio, so a couple of DN of channel offset on a near-black pixel reads as almost
+fully saturated. The threshold now scales with the image (10% of the bright end),
+which the tests cover with exactly that case.
+
+The **median alone is also the wrong thing to report**. A white-light disc with
+one vivid prominence is neutral over almost all its area, so the median sits near
+zero while the very thing colour mode exists for is sitting right there. The
+verdict consults the high end too: in the worker smoke test a small red patch
+gives median 0.0% and p95 70.9%.
+
+### Cost
+
+Two extra Float32 planes, **+33.6 MB** at canvas 2100 -- red and blue share the
+green stack's per-pixel counts rather than carrying their own, since coverage is
+identical across channels. Per frame there are two extra warps and two extra
+remaps in the second pass.
+
+The harness measures C0092 at 40 frames going from 11+10 s to 34+45 s, but most
+of that is not the app's cost: pass 1 does no extra OpenCV work in colour mode,
+so its 11->34 s is entirely ffmpeg's `gbrp` decode and three times the pipe
+throughput. A browser decodes to RGBA either way. The honest figure for the
+browser is the extra warps and remaps in pass 2, plus a planar extraction and
+three times the transfer per frame.
+
+**Caveat on that comparison:** the harness reads `-pix_fmt gray` in mono, which
+is luma, and `gbrp` plane 0 in colour, which is green. The app always uses
+green. For C0013 the two are identical because the footage is monochrome, so
+every mono number in this README is unaffected; on coloured footage they differ,
+which is why the two runs above report different alignment-point counts.
+
+### tools/smoke-worker.js
+
+The pipeline functions have unit tests; the plumbing between them does not, and
+that is where a colour mode goes wrong -- unpacking planar frames, routing red
+and blue through the right transform, picking the right renderer at finish.
+`node tools/smoke-worker.js` drives the real `worker.js` under a node worker
+shim in both modes and checks that mono comes out grey, that colour puts the red
+where the red is and nowhere else, and that the strided-read guard stays silent.
+
 ## Unit tests, and the three bugs they found
 
 `node tools/test-pipeline.js` -- 46 tests, 240 checks, no dependencies. Each one

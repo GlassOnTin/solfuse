@@ -25,6 +25,7 @@ const COARSE = opt('--coarse', null);
 const MINAPS = opt('--minaps', null);
 const SEEING = Number(opt('--seeing', 0));   // exponent on local quality; 0 disables
 const CURVE = args.includes('--curve');      // selection trade-off A(f)
+const COLOUR = args.includes('--colour');    // stack red and blue too, and report how much colour there is
 
 if (!SRC) { console.error('usage: bench-solar.js <video> [--frames N] [--write DIR]'); process.exit(1); }
 
@@ -36,9 +37,12 @@ function probe(file) {
 }
 
 // Raw grayscale frames straight from ffmpeg: no PNG decode, no disk.
-function frameReader(file, w, h) {
-  const size = w * h;
-  const ff = spawn('ffmpeg', ['-v', 'error', '-i', file, '-f', 'rawvideo', '-pix_fmt', 'gray', '-']);
+function frameReader(file, w, h, colour) {
+  // gbrp is planar: the whole G plane, then B, then R. That is exactly the
+  // layout the worker uses, so the harness exercises the same code path.
+  const size = colour ? w * h * 3 : w * h;
+  const ff = spawn('ffmpeg', ['-v', 'error', '-i', file, '-f', 'rawvideo',
+                              '-pix_fmt', colour ? 'gbrp' : 'gray', '-']);
   ff.stderr.on('data', (d) => process.stderr.write(d));
   let buf = Buffer.alloc(0), done = false, waiter = null;
   ff.stdout.on('data', (d) => {
@@ -78,12 +82,18 @@ function frameReader(file, w, h) {
   let refQuarter = null, shifts = [], eccFail = 0, rHint = null;
   const NG0 = Math.round(o.canvas / o.step);
   const qual = new Array(N).fill(null);
+  let chroma = null;
   const frameQ = new Array(N).fill(null);
   const eccReasons = new Map();
-  const r1 = frameReader(SRC, w, h);
+  const r1 = frameReader(SRC, w, h, COLOUR);
+  const nPx = w * h;
+  const split = (buf) => (COLOUR
+    ? { g: buf.subarray(0, nPx), b: buf.subarray(nPx, 2 * nPx), r: buf.subarray(2 * nPx, 3 * nPx) }
+    : { g: buf, b: null, r: null });
   for (let i = 0; i < N; i++) {
-    const gray = await r1.next();
-    if (!gray) break;
+    const frameBuf = await r1.next();
+    if (!frameBuf) break;
+    const { g: gray, r: planeR, b: planeB } = split(frameBuf);
     if (!refQuarter) {
       // First frame defines the canvas registration; everything else lands on it.
       // It MUST use the same coarse method as the frames, or every frame starts
@@ -102,6 +112,13 @@ function frameReader(file, w, h) {
     transforms.push(g.C);
     const m = P.warpToCanvas(gray, w, h, g.C, o.canvas);
     P.accumulate(acc1, m.data, P.coverageOf(g.C, w, h, o.canvas), i);
+    if (COLOUR && !o.multipoint) {
+      if (!chroma) chroma = P.newChroma(o.canvas);
+      const wr = P.warpToCanvas(planeR, w, h, g.C, o.canvas);
+      const wb = P.warpToCanvas(planeB, w, h, g.C, o.canvas);
+      P.accumulateChroma(chroma, wr.data, wb.data, P.coverageOf(g.C, w, h, o.canvas), null);
+      wr.delete(); wb.delete();
+    }
     if (SEEING) qual[i] = P.cellQuality(m, o.canvas, NG0, o);
     if (CURVE) frameQ[i] = P.frameQuality(m, o.canvas, 700);
     m.delete();
@@ -221,10 +238,11 @@ function frameReader(file, w, h) {
 
   const wmap = SEEING ? new Float32Array(o.canvas * o.canvas) : null;
   let usedTotal = 0, fieldMag = [], wStats = [];
-  const r2 = frameReader(SRC, w, h);
+  const r2 = frameReader(SRC, w, h, COLOUR);
   for (let i = 0; i < N; i++) {
-    const gray = await r2.next();
-    if (!gray || !transforms[i]) break;
+    const frameBuf2 = await r2.next();
+    if (!frameBuf2 || !transforms[i]) break;
+    const { g: gray, r: planeR, b: planeB } = split(frameBuf2);
     const warped = P.warpToCanvas(gray, w, h, transforms[i], o.canvas);
     const f = P.measureField(warped, aps, NG, o);
     usedTotal += f.used;
@@ -246,6 +264,17 @@ function frameReader(file, w, h) {
     }
     P.accumulate(acc2, out.data, P.coverageOf(transforms[i], w, h, o.canvas), i, wmap);
     if (curve && rankOf && rankOf.has(i)) P.accumulateCurve(curve, out, rankOf.get(i), i);
+    if (COLOUR) {
+      if (!chroma) chroma = P.newChroma(o.canvas);
+      const cov = P.coverageOf(transforms[i], w, h, o.canvas);
+      const wr = P.warpToCanvas(planeR, w, h, transforms[i], o.canvas);
+      const wb = P.warpToCanvas(planeB, w, h, transforms[i], o.canvas);
+      const rr = new cv.Mat(), rb = new cv.Mat();
+      cv.remap(wr, rr, mapMatX, mapMatY, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
+      cv.remap(wb, rb, mapMatX, mapMatY, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
+      P.accumulateChroma(chroma, rr.data, rb.data, cov, null);
+      wr.delete(); wb.delete(); rr.delete(); rb.delete();
+    }
     warped.delete(); out.delete();
     if ((i + 1) % 100 === 0) process.stdout.write(`\r  pass 2: ${i + 1} frames`);
   }
@@ -275,6 +304,20 @@ function frameReader(file, w, h) {
       }
       console.log(`    best at ${(100 * r.bestFraction).toFixed(0)}% (${r.bestFrames} frames), ` +
                   `gain over using everything ${r.gainOverAll != null ? r.gainOverAll.toFixed(3) + 'x' : 'n/a'}`);
+    }
+  }
+
+  if (COLOUR && chroma) {
+    const col = P.finishChroma(chroma, acc2.frames ? acc2.cnt : acc1.cnt);
+    // No mask needed: colourStrength already skips pixels too dark to carry a
+    // colour, which is what excludes the sky.
+    const cs = P.colourStrength(mpaMean, col.r, col.b, null);
+    if (cs) {
+      console.log(`\n  colour: median saturation ${(100 * cs.median).toFixed(1)}%, ` +
+                  `p95 ${(100 * cs.p95).toFixed(1)}% over ${cs.n} lit pixels`);
+      console.log(`    ${cs.median < 0.03 ? 'essentially neutral - colour mode buys nothing here'
+                        : cs.median < 0.10 ? 'a faint but real tint'
+                        : 'genuinely coloured'}`);
     }
   }
 

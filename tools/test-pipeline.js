@@ -1184,6 +1184,213 @@ async function main() {
     }
   });
 
+  // ---- colour ------------------------------------------------------------
+  console.log('\ncolour');
+
+  test('toPlanes splits into planar RGB with green where the mono path expects it', () => {
+    const w = 3, h = 2, n = w * h;
+    const rgba = new Uint8Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      rgba[i * 4] = 10 + i; rgba[i * 4 + 1] = 50 + i; rgba[i * 4 + 2] = 90 + i; rgba[i * 4 + 3] = 255;
+    }
+    const p = P.toPlanes(rgba, w, h);
+    ok(p.length === n * 3, `planar length ${n * 3}, got ${p.length}`);
+    for (let i = 0; i < n; i++) {
+      ok(p[i] === 10 + i, `red plane ${i}`);
+      ok(p[n + i] === 50 + i, `green plane ${i}`);
+      ok(p[2 * n + i] === 90 + i, `blue plane ${i}`);
+    }
+    // The green plane must be byte-identical to what toGray produces, or colour
+    // mode would quietly align on different data from mono mode.
+    const g = P.toGray(rgba, w, h, 'green');
+    const sub = p.subarray(n, 2 * n);
+    let same = true;
+    for (let i = 0; i < n; i++) if (g[i] !== sub[i]) same = false;
+    ok(same, 'green subarray is identical to toGray(green)');
+  });
+
+  test('chroma normalises by the same counts as the green stack', () => {
+    const c = 3, n = c * c;
+    const acc = P.newAccumulator(c, false);
+    const ch = P.newChroma(c);
+    const cover = new Uint8Array(n).fill(1);
+    cover[4] = 0;                                       // centre never covered
+    const frames = [[60, 100, 140], [80, 120, 160]];
+    for (let f = 0; f < frames.length; f++) {
+      const [r, g, b] = frames[f];
+      P.accumulate(acc, new Uint8Array(n).fill(g), f === 0 ? cover : null, f);
+      P.accumulateChroma(ch, new Uint8Array(n).fill(r), new Uint8Array(n).fill(b),
+                         f === 0 ? cover : null, null);
+    }
+    const lin = P.finishAcc(acc);
+    const col = P.finishChroma(ch, acc.cnt);
+    near(lin[0], 110, 1e-4, 'green mean where both frames covered');
+    near(col.r[0], 70, 1e-4, 'red mean where both frames covered');
+    near(col.b[0], 150, 1e-4, 'blue mean where both frames covered');
+    // The partially covered pixel saw only frame 1, and all three channels must
+    // agree about that or the colour would shift exactly where coverage changes.
+    near(lin[4], 120, 1e-4, 'green at the partially covered pixel');
+    near(col.r[4], 80, 1e-4, 'red at the partially covered pixel');
+    near(col.b[4], 160, 1e-4, 'blue at the partially covered pixel');
+  });
+
+  test('a neutral stack renders grey, and colour mode matches mono there', () => {
+    // If R = G = B the composite must be identical to the mono render. This is
+    // the guard against colour mode silently tinting a white-light stack.
+    const c = 64, n = c * c;
+    const g = new Float32Array(n);
+    for (let i = 0; i < n; i++) g[i] = 20 + (i % c) * 3;
+    const mono = P.render(g, c, {});
+    const col = P.renderColour(g, Float32Array.from(g), Float32Array.from(g), c, {});
+    let worst = 0;
+    for (let i = 0; i < n * 4; i += 4) {
+      for (let k = 0; k < 3; k++) worst = Math.max(worst, Math.abs(col.rgba[i + k] - mono.rgba[i + k]));
+    }
+    ok(worst <= 1, `neutral input renders identically to mono, worst channel diff ${worst}`);
+  });
+
+  test('a red feature comes out red, and saturation scales it', () => {
+    // A corona with an H-alpha prominence: neutral everywhere except one patch
+    // that is strongly red. That is the case colour mode exists for.
+    // Luminance has to vary or the stretch collapses -- render takes lo and hi
+    // as percentiles, and a constant frame gives lo == hi and a black result.
+    // A flat test scene is not a fair test of a tone curve.
+    const c = 96, n = c * c;
+    const g = new Float32Array(n), r = new Float32Array(n), b = new Float32Array(n);
+    const inPatch = (i) => { const x = i % c, y = (i / c) | 0; return x > 40 && x < 56 && y > 40 && y < 56; };
+    for (let i = 0; i < n; i++) {
+      const base = 40 + 80 * ((i % c) / c);            // a gradient across the frame
+      g[i] = base; r[i] = base; b[i] = base;
+      if (inPatch(i)) { r[i] = base * 1.9; b[i] = base * 0.45; }   // H-alpha prominence
+    }
+
+    const sats = [0.5, 1, 2].map((saturation) => {
+      const out = P.renderColour(g, r, b, c, { saturation, chromaBlur: 1.0 });
+      let sr = 0, sb = 0, k = 0, nr = 0, nb = 0, nk = 0;
+      for (let i = 0; i < n; i++) {
+        const q = i * 4;
+        if (inPatch(i)) { sr += out.rgba[q]; sb += out.rgba[q + 2]; k++; }
+        else if (i % c > 70 && i % c < 90) { nr += out.rgba[q]; nb += out.rgba[q + 2]; nk++; }
+      }
+      return { sat: saturation, r: sr / k, b: sb / k, nr: nr / nk, nb: nb / nk };
+    });
+    for (const s2 of sats) {
+      ok(s2.r > s2.b, `saturation ${s2.sat}: the patch is red, R ${s2.r.toFixed(0)} > B ${s2.b.toFixed(0)}`);
+      ok(Math.abs(s2.nr - s2.nb) < 6, `saturation ${s2.sat}: neutral area stays neutral`);
+    }
+    ok(sats[2].r - sats[2].b > sats[0].r - sats[0].b,
+       `higher saturation gives more colour: ${(sats[0].r - sats[0].b).toFixed(0)} -> ${(sats[2].r - sats[2].b).toFixed(0)}`);
+  });
+
+  test('chroma blur suppresses colour noise without touching luminance detail', () => {
+    // The reason for LRGB. Independent noise per channel becomes coloured
+    // speckle if the ratios are left sharp; blurring them must remove that
+    // while the luminance edge survives, since luminance never sees the blur.
+    const c = 128, n = c * c;
+    const g = new Float32Array(n), r = new Float32Array(n), b = new Float32Array(n);
+    let sd = 99;
+    const rnd = () => { sd = (sd * 1664525 + 1013904223) >>> 0; return sd / 4294967296 - 0.5; };
+    for (let i = 0; i < n; i++) {
+      const base = ((i % c) < c / 2) ? 40 : 160;        // a hard luminance edge
+      g[i] = base + rnd() * 14;
+      r[i] = base + rnd() * 14;
+      b[i] = base + rnd() * 14;
+    }
+    const spread = (out) => {
+      let s2 = 0, k = 0;
+      for (let i = 0; i < n; i++) {
+        const q = i * 4;
+        const mx = Math.max(out.rgba[q], out.rgba[q + 1], out.rgba[q + 2]);
+        const mn = Math.min(out.rgba[q], out.rgba[q + 1], out.rgba[q + 2]);
+        s2 += mx - mn; k++;
+      }
+      return s2 / k;
+    };
+    const sharp = P.renderColour(g, r, b, c, { chromaBlur: 0 });
+    const blurred = P.renderColour(g, r, b, c, { chromaBlur: 4 });
+    const sSharp = spread(sharp), sBlur = spread(blurred);
+    ok(sBlur < sSharp * 0.5,
+       `blurring the ratios cuts colour speckle: ${fmt(sSharp)} -> ${fmt(sBlur)} DN channel spread`);
+    // Luminance edge must survive untouched: compare against the mono render.
+    const mono = P.render(g, c, {});
+    let lumErr = 0, k2 = 0;
+    for (let i = 0; i < n; i++) {
+      const q = i * 4;
+      const L = (blurred.rgba[q] + blurred.rgba[q + 1] + blurred.rgba[q + 2]) / 3;
+      lumErr += Math.abs(L - mono.rgba[q]); k2++;
+    }
+    ok(lumErr / k2 < 2, `luminance is unchanged by chroma blur, mean diff ${fmt(lumErr / k2)} DN`);
+  });
+
+  test('chroma ratios come from the raw stack, not the sharpened luminance', () => {
+    // The luminance is deconvolved and sharpened; red and blue are not. If the
+    // ratios were taken against the sharpened green, every edge would gain a
+    // colour fringe. chromaG keeps the denominator raw.
+    const c = 96, n = c * c;
+    const raw = new Float32Array(n), r = new Float32Array(n), b = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = i % c;
+      const base = x < c / 2 ? 50 : 150;               // hard edge, worst case for fringing
+      raw[i] = base; r[i] = base; b[i] = base;         // perfectly neutral
+    }
+    // A "sharpened" luminance: the same edge with overshoot, as deconvolution
+    // would leave it.
+    const sharp = Float32Array.from(raw);
+    for (let i = 0; i < n; i++) {
+      const x = i % c;
+      if (x === c / 2 - 1) sharp[i] = 20;
+      if (x === c / 2) sharp[i] = 190;
+    }
+    const withRaw = P.renderColour(sharp, r, b, c, { chromaG: raw, chromaBlur: 2 });
+    const withoutRaw = P.renderColour(sharp, r, b, c, { chromaBlur: 2 });
+    const fringe = (out) => {
+      let worst = 0;
+      for (let i = 0; i < n; i++) {
+        const q = i * 4;
+        const mx = Math.max(out.rgba[q], out.rgba[q + 1], out.rgba[q + 2]);
+        const mn = Math.min(out.rgba[q], out.rgba[q + 1], out.rgba[q + 2]);
+        worst = Math.max(worst, mx - mn);
+      }
+      return worst;
+    };
+    const fRaw = fringe(withRaw), fBad = fringe(withoutRaw);
+    ok(fRaw <= 2, `a neutral scene stays neutral through a sharpened edge, worst fringe ${fRaw}`);
+    ok(fRaw < fBad || fBad <= 2,
+       `taking ratios against the raw stack is no worse: ${fBad} -> ${fRaw}`);
+  });
+
+  test('colourStrength reports honestly on neutral and coloured input', () => {
+    const n = 4096;
+    const g = new Float32Array(n).fill(100);
+    const neutral = P.colourStrength(g, Float32Array.from(g), Float32Array.from(g), null);
+    ok(neutral && neutral.median < 0.01, `a neutral stack reports no colour, got ${neutral ? fmt(neutral.median) : 'null'}`);
+    const r = new Float32Array(n).fill(150), b = new Float32Array(n).fill(50);
+    const strong = P.colourStrength(g, r, b, null);
+    near(strong.median, (150 - 50) / 150, 0.01, 'saturation of a strongly coloured stack');
+    // Pixels too dark to have a meaningful colour must be excluded, not counted
+    // as neutral -- that would dilute the figure and understate real colour.
+    const dark = new Float32Array(n).fill(2);
+    ok(P.colourStrength(dark, dark, dark, null) === null, 'an all-dark stack reports nothing rather than zero');
+
+    // The case that caught this out on real footage: a bright neutral subject
+    // on a dark sky that carries a small blue pedestal. Saturation is a ratio,
+    // so those near-black pixels read as almost fully saturated and swamp the
+    // median unless the threshold scales with the image.
+    const N2 = 200 * 200;
+    const sg = new Float32Array(N2), sr = new Float32Array(N2), sb = new Float32Array(N2);
+    for (let i = 0; i < N2; i++) {
+      const x = i % 200, y = (i / 200) | 0;
+      const onDisc = Math.hypot(x - 100, y - 100) < 40;
+      if (onDisc) { sr[i] = 200; sg[i] = 200; sb[i] = 200; }     // neutral subject
+      else { sr[i] = 1; sg[i] = 1; sb[i] = 9; }                  // dark sky, blue pedestal
+    }
+    const cs = P.colourStrength(sg, sr, sb, null);
+    ok(cs && cs.median < 0.05,
+       `a neutral subject on a blue-tinted dark sky reports little colour, got ${cs ? fmt(cs.median) : 'null'}`);
+    ok(cs && cs.fraction < 0.2,
+       `and only the lit subject is judged, ${cs ? (100 * cs.fraction).toFixed(1) : '?'}% of pixels`);
+  });
+
   // ---- summary -----------------------------------------------------------
   const failed = results.filter((r) => r.failed.length);
   const checks = results.reduce((s, r) => s + r.checks.length, 0);

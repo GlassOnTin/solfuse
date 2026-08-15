@@ -55,6 +55,21 @@
       return g;
     }
 
+    // Planar RGB: the R plane, then G, then B, each w*h bytes. Planar rather
+    // than interleaved so the green plane is a zero-copy subarray -- every
+    // existing alignment, PSF and statistics path keeps working on exactly the
+    // bytes it works on today, and colour is purely additive.
+    function toPlanes(rgba, w, h) {
+      const n = w * h;
+      const out = new Uint8Array(n * 3);
+      for (let i = 0, p = 0; i < n; i++, p += 4) {
+        out[i] = rgba[p];
+        out[n + i] = rgba[p + 1];
+        out[2 * n + i] = rgba[p + 2];
+      }
+      return out;
+    }
+
     // ---- the disc ----------------------------------------------------------
 
     // Centroid of everything above a fraction of peak brightness. Averaging over
@@ -722,6 +737,125 @@
       for (let i = 0; i < out.length; i++) out[i] = acc.cnt[i] ? acc.sum[i] / acc.cnt[i] : 0;
       return out;
     };
+
+    // Red and blue only. Green is already accumulated by the main accumulator,
+    // and coverage is identical across channels, so the per-pixel counts are
+    // shared rather than duplicated -- two Float32 planes instead of a second
+    // full accumulator with its own counts and halves.
+    function newChroma(canvas) {
+      const n = canvas * canvas;
+      return { canvas, r: new Float32Array(n), b: new Float32Array(n) };
+    }
+
+    function accumulateChroma(ch, dataR, dataB, cover, weight) {
+      const r = ch.r, b = ch.b;
+      for (let i = 0; i < r.length; i++) {
+        if (cover && !cover[i]) continue;
+        const w = weight ? weight[i] : 1;
+        if (!(w > 0)) continue;
+        r[i] += dataR[i] * w;
+        b[i] += dataB[i] * w;
+      }
+    }
+
+    // Divide by the same per-pixel counts the green stack used.
+    function finishChroma(ch, cnt) {
+      const n = ch.r.length;
+      const r = new Float32Array(n), b = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        if (cnt[i]) { r[i] = ch.r[i] / cnt[i]; b[i] = ch.b[i] / cnt[i]; }
+      }
+      return { r, b };
+    }
+
+    // LRGB compositing. Luminance carries every bit of processing -- stacking,
+    // deconvolution, wavelets, sharpening -- and colour is applied as a
+    // low-passed ratio on top.
+    //
+    // Sharpening chroma is the thing to avoid. Colour noise in a stack is
+    // largely uncorrelated between channels, so any high-pass applied to the
+    // ratios turns it into coloured speckle, and the eye is far more forgiving
+    // of soft colour than of noisy colour. Blurring the ratios costs nothing
+    // visible on a solar disc, where the colour genuinely is smooth: the sharp
+    // structure is all luminance.
+    //
+    // Ratios are taken against the mean of the three channels rather than
+    // against green alone, so the composite keeps the luminance it was given
+    // instead of drifting wherever green happens to sit.
+    // `linG` is the luminance source and carries every bit of processing.
+    // `opt.chromaG` is the RAW stacked green to take ratios against; without it
+    // the ratios are computed against a deconvolved, wavelet-sharpened green
+    // while red and blue are raw, so the composite would fight its own
+    // sharpening and fringe at every edge. Defaults to linG for the mono-ish
+    // case where no separate raw stack exists.
+    function renderColour(linG, linR, linB, canvas, o) {
+      const opt = Object.assign({ saturation: 1, chromaBlur: 3.0 }, o || {});
+      const mono = render(linG, canvas, opt);          // all the sharpening lives here
+      const n = canvas * canvas;
+      const cg = opt.chromaG || linG;
+
+      const fr = new Float32Array(n), fg = new Float32Array(n), fb = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const y = (linR[i] + cg[i] + linB[i]) / 3;
+        if (y > 1e-3) { fr[i] = linR[i] / y; fg[i] = cg[i] / y; fb[i] = linB[i] / y; }
+        else { fr[i] = fg[i] = fb[i] = 1; }
+      }
+      if (opt.chromaBlur > 0) {
+        for (const plane of [fr, fg, fb]) {
+          const m = mat32F(canvas, canvas, plane);
+          const bl = new cv.Mat();
+          cv.GaussianBlur(m, bl, new cv.Size(0, 0), opt.chromaBlur);
+          plane.set(bl.data32F);
+          m.delete(); bl.delete();
+        }
+      }
+
+      const sat = opt.saturation;
+      const rgba = mono.rgba;
+      for (let i = 0, q = 0; i < n; i++, q += 4) {
+        const L = rgba[q];                              // mono wrote grey, so any channel
+        rgba[q]     = Math.max(0, Math.min(255, L * (1 + sat * (fr[i] - 1))));
+        rgba[q + 1] = Math.max(0, Math.min(255, L * (1 + sat * (fg[i] - 1))));
+        rgba[q + 2] = Math.max(0, Math.min(255, L * (1 + sat * (fb[i] - 1))));
+      }
+      return { rgba, lo: mono.lo, hi: mono.hi };
+    }
+
+    // How much colour is actually present, as the median saturation over the
+    // pixels that carry signal. Reported rather than assumed: through a
+    // white-light solar filter the answer is close to zero and the user should
+    // be told that colour mode bought them nothing.
+    function colourStrength(linG, linR, linB, mask) {
+      // The threshold has to scale with the image, not sit at a fixed 8 DN.
+      // On the totality clip the blue channel carries a pedestal that puts 88%
+      // of pixels above 8 DN while green clears it in only 19%, so a fixed gate
+      // admitted the whole dark sky. Saturation is a ratio, so a couple of DN
+      // of channel offset on a near-black pixel reads as enormous colour: that
+      // alone reported 51.8% median saturation for a corona that is close to
+      // white. Ten percent of the bright end is a threshold the data sets
+      // itself.
+      const n = linG.length;
+      const peaks = new Float32Array(n);
+      for (let i = 0; i < n; i++) peaks[i] = Math.max(linR[i], linG[i], linB[i]);
+      const samp = [];
+      for (let i = 0; i < n; i += 16) samp.push(peaks[i]);
+      samp.sort((a2, b2) => a2 - b2);
+      const bright = samp[Math.floor(samp.length * 0.995)] || 0;
+      const floor = Math.max(12, bright * 0.10);
+
+      const v = [];
+      for (let i = 0; i < n; i++) {
+        if (mask && !mask[i]) continue;
+        const mx = peaks[i];
+        if (mx < floor) continue;                       // too dark for a ratio to mean anything
+        const mn = Math.min(linR[i], Math.min(linG[i], linB[i]));
+        v.push((mx - mn) / mx);
+      }
+      if (v.length < 100) return null;
+      v.sort((a2, b2) => a2 - b2);
+      return { median: v[v.length >> 1], p95: v[Math.floor(v.length * 0.95)],
+               n: v.length, floor, fraction: v.length / n };
+    }
 
     // ---- point spread function, measured from a limb -----------------------
     //
@@ -1449,10 +1583,11 @@
     }
 
     return {
-      DEFAULTS, toGray, discCentroid, grayMat, centreShift, quarterNorm,
+      DEFAULTS, toGray, toPlanes, discCentroid, grayMat, centreShift, quarterNorm,
       solveGlobal, warpToCanvas, buildAPs, discMaskMat, measureField,
       fillNaN, densify, ramps, subpixel, correlate, lcg,
       newAccumulator, accumulate, finishAcc, render, cellQuality, cellWeights, densifyWeights,
+      newChroma, accumulateChroma, finishChroma, renderColour, colourStrength,
       innerMask, reliability, stackNoise, frameNoise, preview, halfMean, mat32F, releaseScratch,
       edgeProfile, psfFromProfile, richardsonLucy, bilinear, buildSupport, measureRinging,
       waveletSharpen,

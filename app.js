@@ -221,6 +221,19 @@ document.addEventListener('visibilitychange', () => {
 
 // Green channel only. The disc through a white-light filter carries no colour,
 // and sending one plane instead of four cuts the transfer to the worker by 75%.
+// Planar rather than interleaved: the worker takes the green plane as a
+// zero-copy subarray, so nothing on the alignment path changes.
+function planarRGB(rgba, w, h) {
+  const n = w * h;
+  const out = new Uint8Array(n * 3);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    out[i] = rgba[p];
+    out[n + i] = rgba[p + 1];
+    out[2 * n + i] = rgba[p + 2];
+  }
+  return out;
+}
+
 function greenPlane(rgba, w, h) {
   const g = new Uint8Array(w * h);
   for (let i = 0, p = 1; i < g.length; i++, p += 4) g[i] = rgba[p];
@@ -347,6 +360,7 @@ const options = () => ({
   step: Number($('step').value),
   search: Number($('search').value),
   curve: $('doCurve').checked,
+  colour: $('doColour').checked,
 });
 
 const renderOpts = () => ({
@@ -355,6 +369,7 @@ const renderOpts = () => ({
   sharpenRadius: Number($('radius').value),
   wavelet: ['wav0', 'wav1', 'wav2', 'wav3'].map((id) => Number($(id).value)),
   deconv: Number($('deconv').value),
+  saturation: Number($('saturation').value),
   tv: 0,   // the TV term as implemented measurably worsens the result
 });
 
@@ -382,8 +397,12 @@ async function run() {
     const began = await call({ type: 'begin', w, h, opts }, 'began');
 
     const send = (phase) => async (rgba, index, seq) => {
-      const gray = greenPlane(rgba, w, h);
-      const r = await call({ type: 'frame', gray: gray.buffer, index, seq, phase }, 'framed', [gray.buffer]);
+      // Planar RGB in colour mode, whose green plane is byte-identical to the
+      // grayscale a mono run sends, so alignment sees the same data either way.
+      const plane = opts.colour ? planarRGB(rgba, w, h) : greenPlane(rgba, w, h);
+      const key = opts.colour ? 'planes' : 'gray';
+      const r = await call({ type: 'frame', [key]: plane.buffer, index, seq, phase },
+                           'framed', [plane.buffer]);
       track.push({ field: r.field, refine: r.refine, cx: r.cx, cy: r.cy });
       if (seq % 10 === 0) drawTimeline();
     };
@@ -514,6 +533,26 @@ function showStats(res, ref, p1, p2) {
         'The rest were interpolated from their neighbours.');
     add('Differential distortion', px(res.fieldMedian),
         'Median displacement across the disc after global alignment — the part no single shift can remove.');
+  }
+
+  if (res.colour) {
+    head('Colour');
+    const pct = (100 * res.colour.median).toFixed(1) + '%';
+    // The median alone is the wrong thing to judge on. A white-light disc with
+    // one vivid H-alpha prominence is neutral over almost all of its area, so
+    // the median sits near zero while the very thing colour mode exists to
+    // capture is sitting right there. The high end has to be consulted too.
+    const m = res.colour.median, p95 = res.colour.p95;
+    const verdict = m < 0.03 && p95 < 0.15
+      ? 'This footage is essentially neutral, so colour mode has added nothing. Many white-light solar filters record a flat grey image.'
+      : m < 0.03
+        ? 'Neutral over most of its area, but parts of it carry strong colour — a prominence, most likely. Worth keeping.'
+        : m < 0.10
+          ? 'A faint but real tint. Raise saturation if you want to see it.'
+          : 'Genuinely coloured — worth keeping.';
+    add('Median saturation', pct, verdict);
+    add('P95 saturation', (100 * res.colour.p95).toFixed(1) + '%',
+        `Measured over the ${(100 * res.colour.fraction).toFixed(0)}% of pixels bright enough for a colour ratio to mean anything.`);
   }
 
   head('Result quality');

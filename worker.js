@@ -6,7 +6,7 @@
 // reference and the only way to get one is to stack first:
 //
 //   begin    { w, h, opts }              set up, allocate
-//   frame    { gray, index, seq, phase } phase 1: global align + accumulate
+//   frame    { gray | planes, index, seq, phase }  phase 1: global align + accumulate
 //                                        phase 2: multi-point + accumulate
 //   buildRef {}                          finish pass 1, cut alignment points
 //   finish   { sharpen, ... }            render
@@ -17,16 +17,28 @@
 // computed. `seq` is the within-pass counter, used only to split odd from even
 // frames for the reliability measurement.
 //
+// Frames arrive as 8-bit grayscale, or as planar RGB in colour mode. The green
+// plane is a zero-copy subarray of the planar buffer and is byte-identical to
+// the grayscale a mono run would send, so alignment, the PSF, the trade-off
+// curve and every statistic operate on exactly the same data either way.
+// Colour is additive: red and blue ride along through the same transform and
+// the same displacement field, and are composited at render time.
 // Frames arrive as 8-bit grayscale, converted on the main thread while the
-// video decodes. Sending RGBA would triple the transfer for no benefit — the
-// disc through a white-light filter carries no colour information.
+// video decodes, or as planar RGB when colour mode is on.
+//
+// Mono is still the default because the claim behind it turns out to be true
+// for white-light footage, and now measured rather than assumed: on C0013 the
+// three channels are bit-identical in 100% of lit pixels, so colour there costs
+// three times the transfer for literally nothing. Totality is the opposite --
+// C0092 averages R 182, G 123, B 80 and only 2% of pixels are neutral, because
+// prominences are H-alpha red. The app measures which one it has and says so.
 
 const V = self.location.search;
 importScripts('vendor/opencv.js', 'pipeline.js' + V);
 
 let cv = null, P = null, O = null;
 let W = 0, H = 0;
-let acc1 = null, acc2 = null;
+let acc1 = null, acc2 = null, chroma = null, chromaOf = 0;
 let refQuarter = null, ref8 = null, aps = null, NG = 0;
 let transforms = [];
 let ramp = null, mapx = null, mapy = null, mapMatX = null, mapMatY = null;
@@ -59,7 +71,7 @@ function freeAll() {
   if (refQuarter) { refQuarter.delete(); refQuarter = null; }
   if (ref8) { ref8.delete(); ref8 = null; }
   if (aps) { for (const a of aps) { if (a.tmpl) a.tmpl.delete(); } aps = null; }
-  acc1 = acc2 = null; transforms = []; globMean = mpaMean = null;
+  acc1 = acc2 = null; chroma = null; chromaOf = 0; transforms = []; globMean = mpaMean = null;
   if (mapMatX) { mapMatX.delete(); mapMatX = null; }
   if (mapMatY) { mapMatY.delete(); mapMatY = null; }
   ramp = mapx = mapy = null; firstFrame = null;
@@ -168,6 +180,60 @@ function finishPSF(best) {
          radius: circle.r, psf: buf }, [buf]);
 }
 
+// One place decides mono or colour, so finish and rerender cannot drift apart.
+// Falls back to mono whenever colour was not captured, rather than failing.
+// How much colour the footage actually carried. Through a white-light solar
+// filter this comes back near zero, and the user is better told that than left
+// to wonder why the result looks grey.
+function colourReport(lin) {
+  if (!chroma || !ref8) return null;
+  try {
+    const cnt = (chromaOf === 2 && acc2) ? acc2.cnt : acc1.cnt;
+    const col = P.finishChroma(chroma, cnt);
+    const mask = P.innerMask(ref8, O, 40);
+    return P.colourStrength(lin, col.r, col.b, mask);
+  } catch (e) { return null; }
+}
+
+function renderStack(shown, lin, m) {
+  const opt = { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
+                sharpenRadius: m.sharpenRadius, wavelet: m.wavelet };
+  if (!chroma) return P.render(shown, O.canvas, opt);
+  const cnt = (chromaOf === 2 && acc2) ? acc2.cnt : acc1.cnt;
+  const col = P.finishChroma(chroma, cnt);
+  // Luminance is the fully processed green -- deconvolved, wavelet-sharpened,
+  // stretched. Colour comes from the raw stacked channels, low-passed. Chroma
+  // must not inherit the sharpening or it turns stacking noise into speckle.
+  return P.renderColour(shown, col.r, col.b, O.canvas,
+    Object.assign({}, opt, { saturation: m.saturation != null ? m.saturation : 1,
+                             chromaBlur: m.chromaBlur != null ? m.chromaBlur : 3.0,
+                             chromaG: lin }));
+}
+
+// Red and blue take the same route green took: same affine, and where
+// multi-point is on, the same displacement field that is still loaded in
+// mapMatX/mapMatY from this frame. Re-measuring the field per channel would be
+// three times the cost and could disagree between channels, which is exactly
+// how colour fringing gets manufactured.
+function accumulateColour(planeR, planeB, C, useField, cover, pass) {
+  if (!chroma) { chroma = P.newChroma(O.canvas); chromaOf = pass; }
+  if (chromaOf !== pass) return;
+  const out = [];
+  for (const plane of [planeR, planeB]) {
+    const w = P.warpToCanvas(plane, W, H, C, O.canvas);
+    if (useField) {
+      const rm = new cv.Mat();
+      cv.remap(w, rm, mapMatX, mapMatY, cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar(0));
+      w.delete();
+      out.push(rm);
+    } else {
+      out.push(w);
+    }
+  }
+  P.accumulateChroma(chroma, out[0].data, out[1].data, cover, null);
+  out[0].delete(); out[1].delete();
+}
+
 const handlers = {
   async begin(m) {
     await ready();
@@ -177,11 +243,23 @@ const handlers = {
     // step must divide canvas or the grid points stop landing on cell centres.
     O.canvas = Math.round(O.canvas / O.step) * O.step;
     acc1 = P.newAccumulator(O.canvas, true);
+    chroma = null; chromaOf = 0;
     post({ type: 'began', canvas: O.canvas });
   },
 
   async frame(m) {
-    const gray = new Uint8Array(m.gray);
+    // Colour mode sends R, G and B planes back to back. Green is a view into
+    // that buffer, not a copy.
+    let gray, planeR = null, planeB = null;
+    if (m.planes) {
+      const all = new Uint8Array(m.planes);
+      const n = W * H;
+      planeR = all.subarray(0, n);
+      gray = all.subarray(n, 2 * n);
+      planeB = all.subarray(2 * n, 3 * n);
+    } else {
+      gray = new Uint8Array(m.gray);
+    }
     if (m.phase === 1) {
       if (!refQuarter) {
         const c = P.discCentroid(gray, W, H, O.discFrac);
@@ -201,6 +279,11 @@ const handlers = {
       if (O.curve) quality[m.index] = P.frameQuality(warped, O.canvas, 700);
       const cover1 = P.coverageOf(g.C, W, H, O.canvas);
       P.accumulate(acc1, warped.data, cover1, m.seq);
+      // Only one pass produces the image the user keeps, so colour is
+      // accumulated only there: pass 2 when multi-point is on, pass 1 otherwise.
+      if (planeR && !O.multipoint) {
+        accumulateColour(planeR, planeB, g.C, null, cover1, 1);
+      }
       warped.delete();
       if (duePreview(acc1.frames)) sendPreview(acc1, 1, null);
       post({ type: 'framed', index: m.index, phase: 1,
@@ -230,9 +313,11 @@ const handlers = {
         P.accumulate(acc2, out.data, cover2, m.seq);
         if (curve && rankOf) P.accumulateCurve(curve, out, rankOf.get(m.index) ?? 1, m.seq);
         out.delete();
+        if (planeR) accumulateColour(planeR, planeB, C, true, cover2, 2);
       } else {
         P.accumulate(acc2, warped.data, cover2, m.seq);
         if (curve && rankOf) P.accumulateCurve(curve, warped, rankOf.get(m.index) ?? 1, m.seq);
+        if (planeR) accumulateColour(planeR, planeB, C, false, cover2, 2);
       }
       warped.delete();
       if (duePreview(acc2.frames)) sendPreview(acc2, 2, grid);
@@ -325,8 +410,7 @@ const handlers = {
     const lin = O.multipoint && acc2 && acc2.frames ? P.finishAcc(acc2) : globMean;
     mpaMean = lin;
     const shown = deconvolved(lin, m);
-    const r = P.render(shown, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
-                                        sharpenRadius: m.sharpenRadius, wavelet: m.wavelet });
+    const r = renderStack(shown, lin, m);
     const used = stats.used;
     const field = stats.field.slice().sort((a, b) => a - b);
     const buf = r.rgba.buffer;
@@ -348,6 +432,7 @@ const handlers = {
              } catch (e) { return null; }
            })() : null,
            curve: curve ? P.curveResult(curve) : null,
+           colour: colourReport(lin),
            mem: memory() }, [buf, bbuf]);
   },
 
@@ -355,11 +440,10 @@ const handlers = {
   async rerender(m) {
     if (!mpaMean) { post({ type: 'error', message: 'Nothing stacked yet.' }); return; }
     const shown = deconvolved(mpaMean, m);
-    const r = P.render(shown, O.canvas, { lo: m.lo, hi: m.hi, sharpen: m.sharpen,
-                                            sharpenRadius: m.sharpenRadius, wavelet: m.wavelet });
+    const r = renderStack(shown, mpaMean, m);
     const buf = r.rgba.buffer;
     post({ type: 'result', rgba: buf, size: O.canvas, frames: (acc2 && acc2.frames) || acc1.frames,
-           aps: aps ? aps.length : 0, mem: memory() }, [buf]);
+           aps: aps ? aps.length : 0, colour: colourReport(mpaMean), mem: memory() }, [buf]);
   },
 
   async free() { freeAll(); post({ type: 'freed' }); },
@@ -411,7 +495,10 @@ function deconvolved(lin, m) {
 
 function memory() {
   const px = O ? O.canvas * O.canvas : 0;
-  const bytes = (acc1 ? px * 8 * 3 : 0) + (acc2 ? px * 8 * 3 : 0) + (mapx ? px * 4 * 2 : 0);
+  // Chroma is two Float32 planes and no counts of its own: coverage is
+  // identical across channels, so it borrows the green stack's.
+  const bytes = (acc1 ? px * 8 * 3 : 0) + (acc2 ? px * 8 * 3 : 0) + (mapx ? px * 4 * 2 : 0)
+              + (chroma ? px * 4 * 2 : 0);
   return {
     accumulatorMB: +(bytes / 1048576).toFixed(1),
     workerHeapMB: self.performance && performance.memory
