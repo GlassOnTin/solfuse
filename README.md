@@ -367,6 +367,33 @@ where it returns a degenerate zero because the corona falls off outward and the
 far-field "plateau" is dimmer than the near-limb signal. It is reported only
 where the geometry suits it.
 
+### Alignment points on a corona
+
+Selecting alignment points by masking at 0.45 of peak brightness and eroding by
+61 px suits a bright full disc and fails at totality. The threshold keeps only a
+thin ring of inner corona, and eroding a thin ring by that much leaves almost
+nothing: **6 points on a 21x21 grid**, so multi-point alignment had nothing to
+work with. The erosion exists to keep patches off the solar limb, where half the
+patch is empty sky; a fainter, thinner target needs a proportionally smaller
+guard band.
+
+Both now step down a ladder until enough points survive. On a 120-frame totality
+stack that takes 6 points to **26**, with 25 of 26 locating per frame.
+
+Measured like for like at the same frame count, the benefit is modest:
+
+| | points | fine gain | mid gain |
+|---|---|---|---|
+| single rung (old) | 6 | 1.036x | 1.001x |
+| ladder | 26 | 1.030x | 1.026x |
+
+Unchanged in the fine band, slightly better in the mid. Totality simply has
+little fine structure in the corona to correct, so wider coverage cannot buy
+much — but a six-point field cannot describe differential distortion at all,
+and that is worth fixing regardless of what one clip shows. The full-disc case
+is untouched: the ladder stops at the first rung with 183 points and the same
+1.250x gain as before.
+
 ### Defocus versus seeing, told apart by shape
 
 Kurtosis of the line-spread function separates the two kinds of blur, and it

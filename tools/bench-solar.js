@@ -22,6 +22,7 @@ const LIMIT = Number(opt('--frames', 0)) || Infinity;
 const WRITE = opt('--write', null);
 const TAPER = opt('--taper', null);
 const COARSE = opt('--coarse', null);
+const MINAPS = opt('--minaps', null);
 
 if (!SRC) { console.error('usage: bench-solar.js <video> [--frames N] [--write DIR]'); process.exit(1); }
 
@@ -63,6 +64,7 @@ function frameReader(file, w, h) {
   const o = Object.assign({}, P.DEFAULTS);
   if (TAPER != null) o.taper = Number(TAPER);
   if (COARSE) o.coarse = COARSE;
+  if (MINAPS != null) o.minAPs = Number(MINAPS);
   const { w, h, n } = probe(SRC);
   const N = Math.min(LIMIT, n || Infinity);
   console.log(`SolFuse harness — ${SRC}, ${w}x${h}, ${N} of ${n} frames, canvas ${o.canvas}, coarse ${o.coarse}\n`);

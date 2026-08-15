@@ -385,11 +385,38 @@
     // locatable. A patch of featureless photosphere correlates equally well
     // everywhere; its "displacement" would be noise, and it is better to
     // interpolate that point from neighbours that can be measured.
+    // Threshold and erosion both have to suit the target. Masking at 0.45 of peak
+    // and eroding by 61 px is right for a bright full disc, and fatal for the
+    // corona at totality: the threshold keeps only a thin ring and eroding a thin
+    // ring by 61 px leaves almost nothing. That produced 5 alignment points on a
+    // 21x21 grid, so multi-point alignment had nothing to work with.
+    //
+    // The erosion exists to keep patches off the solar limb, where half the patch
+    // is empty sky and the edge dominates the match. A fainter, thinner target
+    // needs a proportionally smaller guard band.
     function buildAPs(refMat, o) {
+      const want = o.minAPs || 24;
+      const rungs = [
+        { frac: o.discFrac, erode: 61 },
+        { frac: 0.25, erode: 31 },
+        { frac: 0.12, erode: 15 },
+      ];
+      let best = null;
+      for (const rung of rungs) {
+        const r = buildAPsAt(refMat, o, rung);
+        if (r.aps.length >= want) { r.rung = rung; return r; }
+        if (!best || r.aps.length > best.aps.length) { best = r; best.rung = rung; }
+        else for (const a of r.aps) if (a.tmpl) a.tmpl.delete();   // discard the losers
+      }
+      return best;
+    }
+
+    function buildAPsAt(refMat, o, rung) {
       const NG = Math.round(o.canvas / o.step);
-      const mask = discMaskMat(refMat, o);
+      const mask = discMaskMat(refMat, Object.assign({}, o, { discFrac: rung.frac }));
       const inner = new cv.Mat();
-      const k = cv.Mat.ones(61, 61, cv.CV_8U);
+      const e = Math.max(3, rung.erode | 1);
+      const k = cv.Mat.ones(e, e, cv.CV_8U);
       cv.erode(mask, inner, k);
       k.delete(); mask.delete();
 
