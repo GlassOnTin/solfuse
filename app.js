@@ -156,8 +156,10 @@ function extractFrames(onFrame, onProgress, rate, range) {
     const tick = async (now, md) => {
       if (stop) return;
       arm();
-      // presentedFrames counts every frame the compositor showed. A jump means
-      // the decoder could not keep up and frames went past unseen.
+      // presentedFrames counts every frame the compositor showed, so a jump means
+      // one went by without reaching us. With playback paused between frames that
+      // is usually a frame already in flight when the pause landed, not the
+      // decoder falling behind.
       if (lastPresented !== null && md.presentedFrames - lastPresented > 1) {
         dropped += md.presentedFrames - lastPresented - 1;
       }
@@ -470,6 +472,22 @@ function finish(res, ref, p1, p2) {
   }
 }
 
+// What a dropped frame means depends on how many there are, and the honest
+// explanation changed once playback started pausing between frames. A handful is
+// pause latency: a frame already decoded can still be presented in the moment
+// before the pause takes effect. Only a large fraction means playback is
+// genuinely outrunning the processing.
+function dropNote(drops, kept) {
+  if (!drops) return 'None — every presented frame was used.';
+  const rate = drops / Math.max(1, drops + kept);
+  if (rate < 0.05) {
+    return `A frame already decoded can slip past in the moment playback pauses between frames. ` +
+           `At ${(100 * rate).toFixed(1)}% this costs nothing — ${kept} of about ${drops + kept} were used.`;
+  }
+  return `Playback is outrunning the processing, so frames went by unseen. Keep the tab visible and ` +
+         `in front, and try a smaller output size.`;
+}
+
 // Everything here is measured on this run. Where a number could not be
 // computed it is omitted rather than guessed at.
 function showStats(res, ref, p1, p2) {
@@ -484,7 +502,7 @@ function showStats(res, ref, p1, p2) {
   add('Output size', `${res.size} × ${res.size}`);
   const drops = (p1.dropped || 0) + (p2.dropped || 0);
   add('Frames dropped by the decoder', String(drops),
-      drops ? 'The decoder could not keep up; the result uses what arrived.' : 'None — every presented frame was used.');
+      dropNote(drops, res.frames));
 
   head('Alignment');
   add('Global refinement beyond centroid', px(ref.medianRefine),
