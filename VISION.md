@@ -10,7 +10,7 @@ Fourth project on the BracketFuse chassis. Unlike the others, this VISION was
 written *after* the evidence rather than before it: the pipeline was prototyped
 in Python against 1140 frames of real 4K solar video first, and only the parts
 that measurably worked were carried into the browser. The numbers are in
-[README.md](README.md).
+[MEASUREMENTS.md](MEASUREMENTS.md).
 
 ---
 
